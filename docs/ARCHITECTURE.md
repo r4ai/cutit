@@ -539,6 +539,9 @@ Export:
 - Typed errors with `thiserror`
 - Structured logs with `tracing`
 - Surface user-facing errors to UI via `Event::Error`
+- Log-first policy: use appropriate log levels (`error`, `warn`, `info`, `debug`, `trace`)
+- Log-first policy: include debugging context in logs (asset/segment IDs, timestamps, time_base)
+- Log-first policy: prefer structured fields over string concatenation
 
 Common failure modes:
 - Unsupported codec / decoder missing
@@ -548,7 +551,18 @@ Common failure modes:
 
 ---
 
-## 11. FFmpeg dependency & distribution strategy (must be decided early)
+## 11. Testing strategy (test-first)
+
+- Write tests first to clarify the spec before implementation.
+- Keep tests minimal but sufficient to guarantee the intended behavior.
+- Separate side effects from logic to keep core components easy to test.
+- Focus regression coverage on:
+  - Timebase conversions (`rescale`), timeline mapping, and segment boundaries
+  - Export correctness (duration, monotonic PTS/DTS) via the CLI harness
+
+---
+
+## 12. FFmpeg dependency & distribution strategy (must be decided early)
 
 Pick one strategy:
 1) **System FFmpeg** during development (simplest)
@@ -561,7 +575,7 @@ Note: `ffmpeg-next` exists and offers Rust wrappers; however it has been describ
 
 ---
 
-## 12. Implementation plan (incremental, testable)
+## 13. Implementation plan (incremental, testable)
 
 ### Step 1 — Media probe + single-frame decode
 - `media-ffmpeg`: open file, detect streams, decode a frame near time `t`
@@ -591,7 +605,7 @@ Note: `ffmpeg-next` exists and offers Rust wrappers; however it has been describ
 
 ---
 
-## 13. Post-MVP extension points
+## 14. Post-MVP extension points
 - Proxy generation (background transcode)
 - Waveform/peaks for audio visualization
 - Multi-track timeline
