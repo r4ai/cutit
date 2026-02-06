@@ -129,7 +129,10 @@ where
         self.playhead_tl = 0;
         self.project = Some(project);
 
-        Ok(vec![Event::ProjectChanged(snapshot)])
+        Ok(vec![
+            Event::ProjectChanged(snapshot),
+            Event::PlayheadChanged { t_tl: 0 },
+        ])
     }
 
     fn set_playhead(&mut self, t_tl: i64) -> Result<Vec<Event>> {
@@ -201,10 +204,11 @@ mod tests {
             })
             .expect("import should succeed");
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         let Event::ProjectChanged(snapshot) = &events[0] else {
             panic!("first event must be ProjectChanged");
         };
+        assert_eq!(events[1], Event::PlayheadChanged { t_tl: 0 });
 
         assert_eq!(snapshot.assets.len(), 1);
         assert_eq!(snapshot.segments.len(), 1);
@@ -280,6 +284,29 @@ mod tests {
         assert_eq!(right.src_out_video, Some(198_000));
         assert_eq!(right.src_in_audio, Some(64_000));
         assert_eq!(right.src_out_audio, Some(105_600));
+    }
+
+    #[test]
+    fn import_emits_playhead_reset_after_scrubbing_previous_project() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("first.mp4"),
+            })
+            .expect("first import should succeed");
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
+
+        let events = engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("second.mp4"),
+            })
+            .expect("second import should succeed");
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], Event::ProjectChanged(_)));
+        assert_eq!(events[1], Event::PlayheadChanged { t_tl: 0 });
     }
 
     #[test]

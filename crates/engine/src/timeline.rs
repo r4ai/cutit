@@ -50,16 +50,14 @@ impl Timeline {
         video_time_base: Option<Rational>,
         audio_time_base: Option<Rational>,
     ) -> Result<()> {
+        if self.is_boundary_split_point(at_tl) {
+            return Err(EngineError::SplitPointAtBoundary { at_tl });
+        }
+
         let index = self
             .find_segment_index(at_tl)
             .ok_or(EngineError::SegmentNotFound { at_tl })?;
         let current = self.segments[index].clone();
-
-        if at_tl == current.timeline_start
-            || at_tl == current.timeline_start + current.timeline_duration
-        {
-            return Err(EngineError::SplitPointAtBoundary { at_tl });
-        }
 
         let local_tl = at_tl - current.timeline_start;
         let left_duration = local_tl;
@@ -98,6 +96,13 @@ impl Timeline {
         self.segments.insert(index + 1, right);
         Ok(())
     }
+
+    fn is_boundary_split_point(&self, at_tl: i64) -> bool {
+        self.segments.iter().any(|segment| {
+            let end = segment.timeline_start + segment.timeline_duration;
+            at_tl == segment.timeline_start || at_tl == end
+        })
+    }
 }
 
 fn split_stream_range(
@@ -113,4 +118,32 @@ fn split_stream_range(
     let delta = rescale(left_duration_tl, TIMELINE_TIME_BASE, time_base);
     let split = (src_in + delta).clamp(src_in, src_out);
     (Some(split), Some(split))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Segment, Timeline};
+    use crate::error::EngineError;
+
+    #[test]
+    fn split_at_timeline_end_is_reported_as_boundary() {
+        let mut timeline = Timeline {
+            segments: vec![Segment {
+                id: 1,
+                asset_id: 1,
+                src_in_video: Some(0),
+                src_out_video: Some(100),
+                src_in_audio: None,
+                src_out_audio: None,
+                timeline_start: 0,
+                timeline_duration: 1_000,
+            }],
+        };
+
+        let result = timeline.split_segment(1_000, 2, None, None);
+        assert!(matches!(
+            result,
+            Err(EngineError::SplitPointAtBoundary { at_tl: 1_000 })
+        ));
+    }
 }
