@@ -1,14 +1,9 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod decode;
+mod error;
+mod probe;
+mod time;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use decode::{DecodedVideoFrame, decode_video_frame_near_seconds};
+pub use error::{MediaFfmpegError, Result};
+pub use probe::{MediaInfo, StreamInfo, StreamKind, probe_media};
+pub use time::{Rational, rescale};
