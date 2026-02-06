@@ -18,7 +18,7 @@ Non-goals for MVP:
 - No plugin system (OFX etc.)
 
 Primary constraints:
-- **Engine is UI-agnostic** (swap iced / egui / Tauri later)
+- **Engine is UI-agnostic** (GUI implementation is isolated in `crates/ui`)
 - **FFmpeg contexts are confined to worker threads** (no sharing across threads)
 - Prefer **correctness & determinism** over “smart” stream copy
 
@@ -48,14 +48,14 @@ This document describes MVP-1; implement MVP-0 first if schedule/risk requires.
 ```
 +-------------------+        commands/events        +------------------------+
 |       UI          | <---------------------------> |     Engine API         |
-|     (iced)        |                               | (UI-agnostic crate)    |
+|    (ui crate)     |                               | (UI-agnostic crate)    |
 +---------+---------+                               +-----------+------------+
           |                                                     |
           | preview frames                                      | uses
           v                                                     v
 +-------------------+                               +------------------------+
 | Preview Renderer  |<-- frames (RGBA/NV12) --------| Media Pipeline (FFmpeg) |
-| (iced widget)     |                               | probe/demux/decode/... |
+|   (ui widget)     |                               | probe/demux/decode/... |
 +-------------------+                               +------------------------+
 ```
 
@@ -94,9 +94,9 @@ This document describes MVP-1; implement MVP-0 first if schedule/risk requires.
       scale.rs            # pixel format conversion (libswscale) if needed
       time.rs             # FFmpeg time_base helpers (rescale wrappers)
       error.rs
-  /ui-iced
+  /ui
     src/
-      main.rs             # iced entrypoint (application builder)
+      main.rs             # UI entrypoint (application builder)
       app.rs              # App state + Message + update/view/subscription
       widgets/
         preview.rs        # Preview widget (Image / shader path)
@@ -111,8 +111,17 @@ This document describes MVP-1; implement MVP-0 first if schedule/risk requires.
 
 Notes:
 - `engine` depends on `media-ffmpeg` via traits (recommended) or directly (acceptable for MVP).
-- `ui-iced` depends on `engine` only (no FFmpeg types, no `media-ffmpeg`).
+- `ui` depends on `engine` only (no FFmpeg types, no `media-ffmpeg`).
 - `cli` is strongly recommended as a deterministic regression harness for export correctness.
+
+### 2.1 GUI implementation boundaries (where to implement)
+- Put all GUI code in `crates/ui/src/` only.
+- `crates/ui/src/main.rs`: app bootstrap + subscription wiring.
+- `crates/ui/src/app.rs`: `AppState`, `Message`, `update`, `view`.
+- `crates/ui/src/bridge.rs`: command/event bridge with the engine thread.
+- `crates/ui/src/widgets/preview.rs`: preview surface and frame presentation.
+- `crates/ui/src/widgets/timeline.rs`: timeline drawing + scrub/split interactions.
+- Keep GUI concerns out of `crates/engine` and `crates/media-ffmpeg`.
 
 ---
 
@@ -411,10 +420,8 @@ CFR conversion (drop/duplicate frames) is explicitly out-of-scope for MVP.
 
 ## 8. UI architecture with iced (MVP GUI)
 
-This section replaces the prior “gpui/egui/etc.” notes with a concrete, **iced-first** design, while preserving engine UI-agnosticism.
-
 ### 8.1 iced version + feature policy (pin explicitly)
-Pin an explicit iced minor version in `ui-iced/Cargo.toml` to avoid silent breakage. Use a workspace lockfile.
+Pin an explicit iced minor version in `ui/Cargo.toml` to avoid silent breakage. Use a workspace lockfile.
 
 Minimum feature set for this MVP:
 - `image` for preview display (RGBA path)
@@ -602,6 +609,28 @@ Note: `ffmpeg-next` exists and offers Rust wrappers; however it has been describ
   - applies deterministic cuts
   - exports
   - validates output duration and monotonic timestamps via ffprobe-like inspection
+
+### Step 6 — GUI bootstrap + engine bridge
+Where to implement:
+- `crates/ui/src/main.rs`
+- `crates/ui/src/app.rs`
+- `crates/ui/src/bridge.rs`
+
+Work:
+- Bootstrap the application (`boot/update/view/subscription`)
+- Initialize engine thread and command/event channels
+- Wire basic UI actions: Import, SetPlayhead, Split command dispatch
+
+### Step 7 — GUI widgets (preview + timeline interaction)
+Where to implement:
+- `crates/ui/src/widgets/preview.rs`
+- `crates/ui/src/widgets/timeline.rs`
+- `crates/ui/src/app.rs`
+
+Work:
+- Render latest `PreviewFrame`
+- Draw segments + playhead on timeline
+- Implement click/drag scrub and split-triggered message flow
 
 ---
 
