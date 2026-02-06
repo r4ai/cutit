@@ -1,14 +1,18 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! UI-agnostic editing engine for the Cutit MVP.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod api;
+pub mod cache;
+pub mod error;
+pub mod export;
+pub mod preview;
+pub mod project;
+pub mod time;
+pub mod timeline;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use api::{Command, Engine, Event, ExportSettings, ProjectSnapshot};
+pub use error::{EngineError, Result};
+pub use preview::{
+    FfmpegMediaBackend, MediaBackend, PreviewFrame, PreviewPixelFormat, ProbedAudioStream,
+    ProbedMedia, ProbedVideoStream,
+};
+pub use time::{Rational, TIMELINE_TIME_BASE, rescale};
