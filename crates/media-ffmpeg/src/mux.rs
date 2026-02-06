@@ -113,11 +113,13 @@ fn build_filter_complex(request: &VideoExportRequest) -> String {
             let output_audio = request
                 .audio
                 .expect("audio settings must exist when audio export is enabled");
+            let output_channel_layout = channel_layout_for_channels(output_audio.channels)
+                .expect("audio channels must map to a channel layout");
             let audio_tb = segment
                 .src_audio_time_base
                 .expect("audio time base must exist when audio export is enabled");
             let audio_chain = format!(
-                "[{}:a:0]asettb={}/{},atrim=start_pts={}:end_pts={},asetpts=PTS-STARTPTS,aresample={}:async=1:first_pts=0[a{}]",
+                "[{}:a:0]asettb={}/{},atrim=start_pts={}:end_pts={},asetpts=PTS-STARTPTS,aresample={}:async=1:first_pts=0,aformat=sample_rates={}:channel_layouts={}[a{}]",
                 segment.input_index,
                 audio_tb.num,
                 audio_tb.den,
@@ -128,6 +130,8 @@ fn build_filter_complex(request: &VideoExportRequest) -> String {
                     .src_out_audio
                     .expect("audio range end must exist when audio export is enabled"),
                 output_audio.sample_rate,
+                output_audio.sample_rate,
+                output_channel_layout,
                 index
             );
             chains.push(audio_chain);
@@ -182,6 +186,11 @@ fn validate_request(request: &VideoExportRequest) -> Result<()> {
                 reason: "audio channels must be positive",
             });
         }
+        if channel_layout_for_channels(audio.channels).is_none() {
+            return Err(MediaFfmpegError::InvalidExportRequest {
+                reason: "audio channel layout is unsupported",
+            });
+        }
     }
 
     for segment in &request.segments {
@@ -226,12 +235,27 @@ fn command_for_display(request: &VideoExportRequest) -> String {
     format!("ffmpeg export {}", request.output_path.display())
 }
 
+fn channel_layout_for_channels(channels: u16) -> Option<&'static str> {
+    match channels {
+        1 => Some("mono"),
+        2 => Some("stereo"),
+        3 => Some("2.1"),
+        4 => Some("quad"),
+        5 => Some("5.0"),
+        6 => Some("5.1"),
+        7 => Some("6.1"),
+        8 => Some("7.1"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AudioExportSettings, VideoExportRequest, VideoExportSegment, build_filter_complex,
+        validate_request,
     };
-    use crate::Rational;
+    use crate::{MediaFfmpegError, Rational};
     use std::path::PathBuf;
 
     #[test]
@@ -306,10 +330,39 @@ mod tests {
         assert_eq!(
             filter,
             "[0:v:0]settb=1/90000,trim=start_pts=90000:end_pts=120000,setpts=PTS-STARTPTS[v0];\
-[0:a:0]asettb=1/48000,atrim=start_pts=48000:end_pts=64000,asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0[a0];\
+[0:a:0]asettb=1/48000,atrim=start_pts=48000:end_pts=64000,asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,aformat=sample_rates=48000:channel_layouts=stereo[a0];\
 [0:v:0]settb=1/90000,trim=start_pts=120000:end_pts=198000,setpts=PTS-STARTPTS[v1];\
-[0:a:0]asettb=1/48000,atrim=start_pts=64000:end_pts=105600,asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0[a1];\
+[0:a:0]asettb=1/48000,atrim=start_pts=64000:end_pts=105600,asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,aformat=sample_rates=48000:channel_layouts=stereo[a1];\
 [v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]"
         );
+    }
+
+    #[test]
+    fn validate_request_rejects_unsupported_audio_channel_layout() {
+        let request = VideoExportRequest {
+            inputs: vec![PathBuf::from("in.mp4")],
+            segments: vec![VideoExportSegment {
+                input_index: 0,
+                src_in_video: 90_000,
+                src_out_video: 120_000,
+                src_video_time_base: Rational::new(1, 90_000).expect("valid"),
+                src_in_audio: Some(48_000),
+                src_out_audio: Some(64_000),
+                src_audio_time_base: Some(Rational::new(1, 48_000).expect("valid")),
+            }],
+            audio: Some(AudioExportSettings {
+                sample_rate: 48_000,
+                channels: 9,
+            }),
+            output_path: PathBuf::from("out.mp4"),
+        };
+
+        let result = validate_request(&request);
+        assert!(matches!(
+            result,
+            Err(MediaFfmpegError::InvalidExportRequest {
+                reason: "audio channel layout is unsupported"
+            })
+        ));
     }
 }

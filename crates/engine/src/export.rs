@@ -133,12 +133,17 @@ pub fn build_video_export_plan(project: &Project, output_path: PathBuf) -> Resul
             }
 
             // Fine-grained splits can round to zero audio ticks while video stays positive.
-            // Keep the project exportable by extending to one audio tick.
-            let src_out_audio = if src_out_audio == src_in_audio {
-                src_out_audio.saturating_add(1)
-            } else {
-                src_out_audio
-            };
+            // Keep the project exportable by expanding to one tick while avoiding end-overrun
+            // when possible.
+            let mut src_in_audio = src_in_audio;
+            let mut src_out_audio = src_out_audio;
+            if src_out_audio == src_in_audio {
+                if src_in_audio > 0 {
+                    src_in_audio -= 1;
+                } else {
+                    src_out_audio = src_out_audio.saturating_add(1);
+                }
+            }
             let export_segment = &mut segments[index];
             export_segment.src_in_audio = Some(src_in_audio);
             export_segment.src_out_audio = Some(src_out_audio);
