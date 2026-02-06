@@ -92,22 +92,23 @@ impl AppState {
     }
 
     fn poll_engine_events(&mut self) {
-        loop {
-            let event = match self.engine_rx.as_ref() {
-                Some(receiver) => match receiver.try_recv() {
-                    Ok(event) => event,
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.status = String::from("engine event channel closed");
-                        self.engine_tx = None;
-                        self.engine_rx = None;
-                        break;
-                    }
-                },
-                None => break,
-            };
+        let mut disconnected = false;
 
-            self.apply_engine_event(event);
+        while let Some(receiver) = self.engine_rx.as_ref() {
+            match receiver.try_recv() {
+                Ok(event) => self.apply_engine_event(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.status = String::from("engine event channel closed");
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if disconnected {
+            self.engine_tx = None;
+            self.engine_rx = None;
         }
     }
 
