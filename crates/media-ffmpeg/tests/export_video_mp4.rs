@@ -49,7 +49,7 @@ fn make_sample_video() -> PathBuf {
 fn make_sample_video_with_non_zero_start_pts() -> PathBuf {
     let base = make_sample_video();
     let output = std::env::temp_dir().join(format!(
-        "cutit-step3-shifted-{}-{}.mp4",
+        "cutit-step3-shifted-{}-{}.ts",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -58,7 +58,7 @@ fn make_sample_video_with_non_zero_start_pts() -> PathBuf {
     ));
 
     let status = Command::new("ffmpeg")
-        .args(["-y", "-v", "error", "-itsoffset", "2"])
+        .args(["-y", "-v", "error"])
         .arg("-i")
         .arg(&base)
         .args(["-map", "0:v", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
