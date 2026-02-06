@@ -59,7 +59,7 @@ pub trait MediaBackend {
     /// Decodes one preview frame around `at_seconds`.
     fn decode_preview_frame(&self, path: &Path, at_seconds: f64) -> Result<PreviewFrame>;
 
-    /// Exports timeline segments into a single video-only file.
+    /// Exports timeline segments into a single MP4 file.
     fn export_video(&self, plan: &ExportVideoPlan) -> Result<()>;
 }
 
@@ -152,9 +152,16 @@ impl MediaBackend for FfmpegMediaBackend {
                     input_index: segment.input_index,
                     src_in_video: segment.src_in_video,
                     src_out_video: segment.src_out_video,
-                    src_time_base: segment.src_time_base.into(),
+                    src_video_time_base: segment.src_video_time_base.into(),
+                    src_in_audio: segment.src_in_audio,
+                    src_out_audio: segment.src_out_audio,
+                    src_audio_time_base: segment.src_audio_time_base.map(Into::into),
                 })
                 .collect(),
+            audio: plan.audio.map(|audio| media_ffmpeg::AudioExportSettings {
+                sample_rate: audio.sample_rate,
+                channels: audio.channels,
+            }),
             output_path: plan.output_path.clone(),
         };
         media_ffmpeg::export_video_mp4(&request)?;

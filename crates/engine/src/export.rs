@@ -4,27 +4,39 @@ use crate::error::{EngineError, Result};
 use crate::project::Project;
 use crate::time::Rational;
 
-/// Export plan for video-only rendering.
+/// Export plan for MP4 rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportVideoPlan {
     pub inputs: Vec<PathBuf>,
     pub segments: Vec<ExportVideoSegment>,
+    pub audio: Option<ExportAudioSettings>,
     pub output_path: PathBuf,
 }
 
-/// One video segment in export order.
+/// Audio output settings used by export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportAudioSettings {
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+/// One segment in export order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportVideoSegment {
     pub input_index: usize,
     pub src_in_video: i64,
     pub src_out_video: i64,
-    pub src_time_base: Rational,
+    pub src_video_time_base: Rational,
+    pub src_in_audio: Option<i64>,
+    pub src_out_audio: Option<i64>,
+    pub src_audio_time_base: Option<Rational>,
 }
 
-/// Builds a video-only export plan from the current project timeline.
+/// Builds an export plan from the current project timeline.
 pub fn build_video_export_plan(project: &Project, output_path: PathBuf) -> Result<ExportVideoPlan> {
     let mut inputs = Vec::<PathBuf>::new();
     let mut segments = Vec::<ExportVideoSegment>::new();
+    let mut selected = Vec::<(&crate::timeline::Segment, &crate::project::MediaAsset)>::new();
 
     for timeline_segment in &project.timeline.segments {
         let asset = project
@@ -72,13 +84,77 @@ pub fn build_video_export_plan(project: &Project, output_path: PathBuf) -> Resul
             input_index,
             src_in_video,
             src_out_video,
-            src_time_base: video.time_base,
+            src_video_time_base: video.time_base,
+            src_in_audio: None,
+            src_out_audio: None,
+            src_audio_time_base: None,
         });
+        selected.push((timeline_segment, asset));
+    }
+
+    let has_audio = selected.iter().any(|(_, asset)| asset.audio.is_some());
+    let mut audio = None;
+    if has_audio {
+        let first_audio = selected.iter().find_map(|(_, asset)| asset.audio).ok_or(
+            EngineError::MissingAudioStream {
+                asset_id: selected
+                    .first()
+                    .map(|(_, asset)| asset.id)
+                    .unwrap_or_default(),
+            },
+        )?;
+        audio = Some(ExportAudioSettings {
+            sample_rate: first_audio.sample_rate,
+            channels: first_audio.channels,
+        });
+
+        for (index, (timeline_segment, asset)) in selected.iter().enumerate() {
+            let audio_stream = asset
+                .audio
+                .ok_or(EngineError::MissingAudioStream { asset_id: asset.id })?;
+            let src_in_audio =
+                timeline_segment
+                    .src_in_audio
+                    .ok_or(EngineError::MissingAudioRange {
+                        segment_id: timeline_segment.id,
+                    })?;
+            let src_out_audio =
+                timeline_segment
+                    .src_out_audio
+                    .ok_or(EngineError::MissingAudioRange {
+                        segment_id: timeline_segment.id,
+                    })?;
+            if src_out_audio < src_in_audio {
+                return Err(EngineError::InvalidAudioRange {
+                    segment_id: timeline_segment.id,
+                    src_in_audio,
+                    src_out_audio,
+                });
+            }
+
+            // Fine-grained splits can round to zero audio ticks while video stays positive.
+            // Keep the project exportable by expanding to one tick while avoiding end-overrun
+            // when possible.
+            let mut src_in_audio = src_in_audio;
+            let mut src_out_audio = src_out_audio;
+            if src_out_audio == src_in_audio {
+                if src_in_audio > 0 {
+                    src_in_audio -= 1;
+                } else {
+                    src_out_audio = src_out_audio.saturating_add(1);
+                }
+            }
+            let export_segment = &mut segments[index];
+            export_segment.src_in_audio = Some(src_in_audio);
+            export_segment.src_out_audio = Some(src_out_audio);
+            export_segment.src_audio_time_base = Some(audio_stream.time_base);
+        }
     }
 
     Ok(ExportVideoPlan {
         inputs,
         segments,
+        audio,
         output_path,
     })
 }
