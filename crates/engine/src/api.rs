@@ -201,7 +201,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{Command, Engine, Event, ExportSettings};
-    use crate::export::{ExportVideoPlan, ExportVideoSegment};
+    use crate::export::{ExportAudioSettings, ExportVideoPlan, ExportVideoSegment};
     use crate::preview::{
         MediaBackend, PreviewFrame, PreviewPixelFormat, ProbedAudioStream, ProbedMedia,
         ProbedVideoStream,
@@ -379,19 +379,32 @@ mod tests {
         let plan = &calls[0];
         assert_eq!(plan.inputs, vec![PathBuf::from("demo.mp4")]);
         assert_eq!(
+            plan.audio,
+            Some(ExportAudioSettings {
+                sample_rate: 48_000,
+                channels: 2,
+            })
+        );
+        assert_eq!(
             plan.segments,
             vec![
                 ExportVideoSegment {
                     input_index: 0,
                     src_in_video: 90_000,
                     src_out_video: 120_000,
-                    src_time_base: Rational::new(1, 90_000).expect("valid rational"),
+                    src_video_time_base: Rational::new(1, 90_000).expect("valid rational"),
+                    src_in_audio: Some(48_000),
+                    src_out_audio: Some(64_000),
+                    src_audio_time_base: Some(Rational::new(1, 48_000).expect("valid rational"),),
                 },
                 ExportVideoSegment {
                     input_index: 0,
                     src_in_video: 120_000,
                     src_out_video: 198_000,
-                    src_time_base: Rational::new(1, 90_000).expect("valid rational"),
+                    src_video_time_base: Rational::new(1, 90_000).expect("valid rational"),
+                    src_in_audio: Some(64_000),
+                    src_out_audio: Some(105_600),
+                    src_audio_time_base: Some(Rational::new(1, 48_000).expect("valid rational"),),
                 },
             ]
         );
@@ -424,8 +437,82 @@ mod tests {
         let calls = export_calls.lock().expect("lock export calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].segments.len(), 1);
+        assert_eq!(
+            calls[0].audio,
+            Some(ExportAudioSettings {
+                sample_rate: 48_000,
+                channels: 2,
+            })
+        );
         assert_eq!(calls[0].segments[0].src_in_video, 90_000);
         assert_eq!(calls[0].segments[0].src_out_video, 198_000);
+        assert_eq!(calls[0].segments[0].src_in_audio, Some(48_000));
+        assert_eq!(calls[0].segments[0].src_out_audio, Some(105_600));
+    }
+
+    #[test]
+    fn export_allows_subframe_split_with_zero_length_audio_range() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let export_calls = backend.export_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 8 })
+            .expect("split should succeed");
+
+        let events = engine
+            .handle_command(Command::Export {
+                path: PathBuf::from("out.mp4"),
+                settings: ExportSettings::default(),
+            })
+            .expect("export should succeed");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], Event::ExportProgress { done: 2, total: 2 });
+
+        let calls = export_calls.lock().expect("lock export calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].segments.len(), 2);
+        assert_eq!(calls[0].segments[0].src_in_video, 90_000);
+        assert_eq!(calls[0].segments[0].src_out_video, 90_001);
+        assert_eq!(calls[0].segments[0].src_in_audio, Some(47_999));
+        assert_eq!(calls[0].segments[0].src_out_audio, Some(48_000));
+    }
+
+    #[test]
+    fn export_subframe_split_near_audio_end_keeps_audio_range_in_bounds() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let export_calls = backend.export_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 1_199_990 })
+            .expect("split should succeed");
+
+        engine
+            .handle_command(Command::Export {
+                path: PathBuf::from("out.mp4"),
+                settings: ExportSettings::default(),
+            })
+            .expect("export should succeed");
+
+        let calls = export_calls.lock().expect("lock export calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].segments.len(), 2);
+
+        let right = &calls[0].segments[1];
+        assert_eq!(right.src_in_video, 197_999);
+        assert_eq!(right.src_out_video, 198_000);
+        assert_eq!(right.src_in_audio, Some(105_599));
+        assert_eq!(right.src_out_audio, Some(105_600));
     }
 
     fn sample_probed_media() -> ProbedMedia {

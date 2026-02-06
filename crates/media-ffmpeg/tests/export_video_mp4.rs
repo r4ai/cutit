@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use media_ffmpeg::{
-    Rational, VideoExportRequest, VideoExportSegment, export_video_mp4, probe_media, rescale,
+    AudioExportSettings, Rational, VideoExportRequest, VideoExportSegment, export_video_mp4,
+    probe_media, rescale,
 };
 
 fn make_sample_video() -> PathBuf {
@@ -74,17 +75,25 @@ fn make_sample_video_with_non_zero_start_pts() -> PathBuf {
 }
 
 #[test]
-fn export_video_mp4_trims_and_concatenates_video_only_segments() {
+fn export_video_mp4_trims_and_concatenates_av_segments() {
     let sample = make_sample_video();
     let probe = probe_media(&sample).expect("probe should succeed");
     let video = probe.first_video().expect("video stream should exist");
-    let src_in = video.start_pts.unwrap_or(0);
-    let tb = video.time_base;
+    let audio = probe.first_audio().expect("audio stream should exist");
+    let video_src_in = video.start_pts.unwrap_or(0);
+    let video_tb = video.time_base;
+    let audio_src_in = audio.start_pts.unwrap_or(0);
+    let audio_tb = audio.time_base;
 
-    let seg0_start = src_in + rescale(200_000, Rational::MICROS, tb);
-    let seg0_end = src_in + rescale(500_000, Rational::MICROS, tb);
-    let seg1_start = src_in + rescale(700_000, Rational::MICROS, tb);
-    let seg1_end = src_in + rescale(1_000_000, Rational::MICROS, tb);
+    let seg0_video_start = video_src_in + rescale(200_000, Rational::MICROS, video_tb);
+    let seg0_video_end = video_src_in + rescale(500_000, Rational::MICROS, video_tb);
+    let seg1_video_start = video_src_in + rescale(700_000, Rational::MICROS, video_tb);
+    let seg1_video_end = video_src_in + rescale(1_000_000, Rational::MICROS, video_tb);
+
+    let seg0_audio_start = audio_src_in + rescale(200_000, Rational::MICROS, audio_tb);
+    let seg0_audio_end = audio_src_in + rescale(500_000, Rational::MICROS, audio_tb);
+    let seg1_audio_start = audio_src_in + rescale(700_000, Rational::MICROS, audio_tb);
+    let seg1_audio_end = audio_src_in + rescale(1_000_000, Rational::MICROS, audio_tb);
 
     let output = std::env::temp_dir().join(format!(
         "cutit-step3-exported-{}-{}.mp4",
@@ -100,17 +109,27 @@ fn export_video_mp4_trims_and_concatenates_video_only_segments() {
         segments: vec![
             VideoExportSegment {
                 input_index: 0,
-                src_in_video: seg0_start,
-                src_out_video: seg0_end,
-                src_time_base: tb,
+                src_in_video: seg0_video_start,
+                src_out_video: seg0_video_end,
+                src_video_time_base: video_tb,
+                src_in_audio: Some(seg0_audio_start),
+                src_out_audio: Some(seg0_audio_end),
+                src_audio_time_base: Some(audio_tb),
             },
             VideoExportSegment {
                 input_index: 0,
-                src_in_video: seg1_start,
-                src_out_video: seg1_end,
-                src_time_base: tb,
+                src_in_video: seg1_video_start,
+                src_out_video: seg1_video_end,
+                src_video_time_base: video_tb,
+                src_in_audio: Some(seg1_audio_start),
+                src_out_audio: Some(seg1_audio_end),
+                src_audio_time_base: Some(audio_tb),
             },
         ],
+        audio: Some(AudioExportSettings {
+            sample_rate: 48_000,
+            channels: 2,
+        }),
         output_path: output.clone(),
     };
 
@@ -122,8 +141,8 @@ fn export_video_mp4_trims_and_concatenates_video_only_segments() {
         "video stream should exist"
     );
     assert!(
-        exported.first_audio().is_none(),
-        "audio stream should not exist"
+        exported.first_audio().is_some(),
+        "audio stream should exist"
     );
 
     let duration = exported
@@ -163,8 +182,12 @@ fn export_video_mp4_handles_input_with_non_zero_start_pts() {
             input_index: 0,
             src_in_video: src_in,
             src_out_video: src_out,
-            src_time_base: video.time_base,
+            src_video_time_base: video.time_base,
+            src_in_audio: None,
+            src_out_audio: None,
+            src_audio_time_base: None,
         }],
+        audio: None,
         output_path: output.clone(),
     };
 
