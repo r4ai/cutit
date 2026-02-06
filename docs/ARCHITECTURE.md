@@ -105,7 +105,8 @@ This document describes MVP-1; implement MVP-0 first if schedule/risk requires.
   /cli (optional)
     src/
       main.rs             # headless import/export tool (tests/regression)
-/ARCHITECTURE.md
+/docs
+  ARCHITECTURE.md
 ```
 
 Notes:
