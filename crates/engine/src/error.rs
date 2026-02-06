@@ -8,15 +8,33 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 #[derive(Debug)]
 pub enum EngineError {
     ProjectNotLoaded,
-    SegmentNotFound { at_tl: i64 },
-    SplitPointAtBoundary { at_tl: i64 },
-    MissingAsset { asset_id: u64 },
-    MissingVideoStream { asset_id: u64 },
+    SegmentNotFound {
+        at_tl: i64,
+    },
+    SplitPointAtBoundary {
+        at_tl: i64,
+    },
+    MissingAsset {
+        asset_id: u64,
+    },
+    MissingVideoStream {
+        asset_id: u64,
+    },
+    MissingVideoRange {
+        segment_id: u64,
+    },
+    InvalidVideoRange {
+        segment_id: u64,
+        src_in_video: i64,
+        src_out_video: i64,
+    },
     MissingDuration(PathBuf),
     MissingVideoDimensions(PathBuf),
     MissingAudioMetadata(PathBuf),
-    InvalidRational { num: i32, den: i32 },
-    ExportNotImplemented,
+    InvalidRational {
+        num: i32,
+        den: i32,
+    },
     Media(media_ffmpeg::MediaFfmpegError),
 }
 
@@ -34,6 +52,17 @@ impl Display for EngineError {
             Self::MissingVideoStream { asset_id } => {
                 write!(f, "video stream missing in asset {asset_id}")
             }
+            Self::MissingVideoRange { segment_id } => {
+                write!(f, "video range missing in segment {segment_id}")
+            }
+            Self::InvalidVideoRange {
+                segment_id,
+                src_in_video,
+                src_out_video,
+            } => write!(
+                f,
+                "invalid video range in segment {segment_id}: {src_in_video}..{src_out_video}"
+            ),
             Self::MissingDuration(path) => {
                 write!(f, "media duration is missing: {}", path.display())
             }
@@ -44,7 +73,6 @@ impl Display for EngineError {
                 write!(f, "audio metadata is missing: {}", path.display())
             }
             Self::InvalidRational { num, den } => write!(f, "invalid rational {num}/{den}"),
-            Self::ExportNotImplemented => write!(f, "export is not implemented in step 2"),
             Self::Media(err) => write!(f, "media backend error: {err}"),
         }
     }

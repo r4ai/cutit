@@ -14,6 +14,9 @@ pub enum MediaFfmpegError {
     InvalidTimestampSeconds(f64),
     MissingVideoStream(PathBuf),
     MissingVideoDimensions(PathBuf),
+    InvalidExportRequest {
+        reason: &'static str,
+    },
     Io {
         context: &'static str,
         source: std::io::Error,
@@ -44,6 +47,9 @@ impl Display for MediaFfmpegError {
             }
             Self::MissingVideoDimensions(path) => {
                 write!(f, "video dimensions missing: {}", path.display())
+            }
+            Self::InvalidExportRequest { reason } => {
+                write!(f, "invalid export request: {reason}")
             }
             Self::Io { context, source } => {
                 write!(f, "{context}: {source}")

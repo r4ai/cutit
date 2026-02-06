@@ -72,6 +72,15 @@ impl From<media_ffmpeg::Rational> for Rational {
     }
 }
 
+impl From<Rational> for media_ffmpeg::Rational {
+    fn from(value: Rational) -> Self {
+        Self {
+            num: value.num,
+            den: value.den,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Rational;

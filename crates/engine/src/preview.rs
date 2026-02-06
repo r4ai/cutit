@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::{EngineError, Result};
+use crate::export::ExportVideoPlan;
 use crate::project::ensure_non_empty_duration;
 use crate::time::{Rational, TIMELINE_TIME_BASE, rescale};
 
@@ -57,6 +58,9 @@ pub trait MediaBackend {
 
     /// Decodes one preview frame around `at_seconds`.
     fn decode_preview_frame(&self, path: &Path, at_seconds: f64) -> Result<PreviewFrame>;
+
+    /// Exports timeline segments into a single video-only file.
+    fn export_video(&self, plan: &ExportVideoPlan) -> Result<()>;
 }
 
 /// FFmpeg CLI-backed backend used by production wiring.
@@ -136,6 +140,25 @@ impl MediaBackend for FfmpegMediaBackend {
             format: PreviewPixelFormat::Rgba8,
             bytes: decoded.rgba.into(),
         })
+    }
+
+    fn export_video(&self, plan: &ExportVideoPlan) -> Result<()> {
+        let request = media_ffmpeg::VideoExportRequest {
+            inputs: plan.inputs.clone(),
+            segments: plan
+                .segments
+                .iter()
+                .map(|segment| media_ffmpeg::VideoExportSegment {
+                    input_index: segment.input_index,
+                    src_in_video: segment.src_in_video,
+                    src_out_video: segment.src_out_video,
+                    src_time_base: segment.src_time_base.into(),
+                })
+                .collect(),
+            output_path: plan.output_path.clone(),
+        };
+        media_ffmpeg::export_video_mp4(&request)?;
+        Ok(())
     }
 }
 

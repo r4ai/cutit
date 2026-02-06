@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::error::{EngineError, Result};
+use crate::export::build_video_export_plan;
 use crate::preview::{FfmpegMediaBackend, MediaBackend, PreviewFrame};
 use crate::project::{Project, normalize_playhead};
 
@@ -40,7 +41,7 @@ pub struct EngineErrorEvent {
     pub message: String,
 }
 
-/// Export settings placeholder for Step 3+.
+/// Export settings for video-only MVP export.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExportSettings {}
 
@@ -75,7 +76,7 @@ pub struct SegmentSummary {
     pub src_out_audio: Option<i64>,
 }
 
-/// Step 2 engine implementation.
+/// Engine implementation for import/scrub/split/export commands.
 #[derive(Debug)]
 pub struct Engine<M> {
     media: M,
@@ -113,9 +114,8 @@ where
             Command::Import { path } => self.import(path),
             Command::SetPlayhead { t_tl } => self.set_playhead(t_tl),
             Command::Split { at_tl } => self.split(at_tl),
-            Command::Export { .. } | Command::CancelExport => {
-                Err(EngineError::ExportNotImplemented)
-            }
+            Command::Export { path, settings } => self.export(path, settings),
+            Command::CancelExport => Ok(Vec::new()),
         }
     }
 
@@ -162,6 +162,19 @@ where
         Ok(vec![Event::ProjectChanged(project.snapshot())])
     }
 
+    fn export(&mut self, path: PathBuf, _settings: ExportSettings) -> Result<Vec<Event>> {
+        let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
+        let plan = build_video_export_plan(project, path.clone())?;
+        let total = plan.segments.len() as u64;
+
+        self.media.export_video(&plan)?;
+
+        Ok(vec![
+            Event::ExportProgress { done: total, total },
+            Event::ExportFinished { path },
+        ])
+    }
+
     fn allocate_asset_id(&mut self) -> u64 {
         let id = self.next_asset_id;
         self.next_asset_id += 1;
@@ -187,7 +200,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    use super::{Command, Engine, Event};
+    use super::{Command, Engine, Event, ExportSettings};
+    use crate::export::{ExportVideoPlan, ExportVideoSegment};
     use crate::preview::{
         MediaBackend, PreviewFrame, PreviewPixelFormat, ProbedAudioStream, ProbedMedia,
         ProbedVideoStream,
@@ -333,6 +347,87 @@ mod tests {
         assert_eq!(decoded_seconds, 0.0);
     }
 
+    #[test]
+    fn export_calls_backend_with_timeline_ordered_segments() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let export_calls = backend.export_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 333_333 })
+            .expect("split should succeed");
+
+        let output_path = PathBuf::from("out.mp4");
+        let events = engine
+            .handle_command(Command::Export {
+                path: output_path.clone(),
+                settings: ExportSettings::default(),
+            })
+            .expect("export should succeed");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], Event::ExportProgress { done: 2, total: 2 });
+        assert_eq!(events[1], Event::ExportFinished { path: output_path });
+
+        let calls = export_calls.lock().expect("lock export calls");
+        assert_eq!(calls.len(), 1);
+
+        let plan = &calls[0];
+        assert_eq!(plan.inputs, vec![PathBuf::from("demo.mp4")]);
+        assert_eq!(
+            plan.segments,
+            vec![
+                ExportVideoSegment {
+                    input_index: 0,
+                    src_in_video: 90_000,
+                    src_out_video: 120_000,
+                    src_time_base: Rational::new(1, 90_000).expect("valid rational"),
+                },
+                ExportVideoSegment {
+                    input_index: 0,
+                    src_in_video: 120_000,
+                    src_out_video: 198_000,
+                    src_time_base: Rational::new(1, 90_000).expect("valid rational"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn export_skips_zero_length_video_ranges_created_by_subframe_split() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let export_calls = backend.export_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 1 })
+            .expect("split should succeed");
+
+        let events = engine
+            .handle_command(Command::Export {
+                path: PathBuf::from("out.mp4"),
+                settings: ExportSettings::default(),
+            })
+            .expect("export should succeed");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], Event::ExportProgress { done: 1, total: 1 });
+
+        let calls = export_calls.lock().expect("lock export calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].segments.len(), 1);
+        assert_eq!(calls[0].segments[0].src_in_video, 90_000);
+        assert_eq!(calls[0].segments[0].src_out_video, 198_000);
+    }
+
     fn sample_probed_media() -> ProbedMedia {
         let duration_tl = 1_200_000;
         let video_tb = Rational::new(1, 90_000).expect("valid rational");
@@ -386,6 +481,7 @@ mod tests {
         probe: ProbedMedia,
         frame: PreviewFrame,
         decode_calls: Arc<Mutex<Vec<f64>>>,
+        export_calls: Arc<Mutex<Vec<ExportVideoPlan>>>,
     }
 
     impl MockBackend {
@@ -394,11 +490,16 @@ mod tests {
                 probe,
                 frame,
                 decode_calls: Arc::new(Mutex::new(Vec::new())),
+                export_calls: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         fn decode_calls(&self) -> Arc<Mutex<Vec<f64>>> {
             Arc::clone(&self.decode_calls)
+        }
+
+        fn export_calls(&self) -> Arc<Mutex<Vec<ExportVideoPlan>>> {
+            Arc::clone(&self.export_calls)
         }
     }
 
@@ -417,6 +518,14 @@ mod tests {
                 .expect("lock decode calls")
                 .push(at_seconds);
             Ok(self.frame.clone())
+        }
+
+        fn export_video(&self, plan: &ExportVideoPlan) -> crate::Result<()> {
+            self.export_calls
+                .lock()
+                .expect("lock export calls")
+                .push(plan.clone());
+            Ok(())
         }
     }
 }
