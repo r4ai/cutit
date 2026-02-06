@@ -20,11 +20,11 @@ jobs:
       matrix:
         include:
           - task: format
-            command: cargo fmt --all -- --check
+            command: cargo metadata --format-version 1 --locked > /dev/null && cargo fmt --all -- --check
           - task: clippy
-            command: cargo clippy --workspace --all-targets --all-features -- -D warnings
+            command: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           - task: test
-            command: cargo test --workspace --all-targets
+            command: cargo test --workspace --all-targets --locked
             requires_ffmpeg: true
 
     steps:
