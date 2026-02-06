@@ -20,13 +20,24 @@ pub enum EngineError {
     MissingVideoStream {
         asset_id: u64,
     },
+    MissingAudioStream {
+        asset_id: u64,
+    },
     MissingVideoRange {
+        segment_id: u64,
+    },
+    MissingAudioRange {
         segment_id: u64,
     },
     InvalidVideoRange {
         segment_id: u64,
         src_in_video: i64,
         src_out_video: i64,
+    },
+    InvalidAudioRange {
+        segment_id: u64,
+        src_in_audio: i64,
+        src_out_audio: i64,
     },
     MissingDuration(PathBuf),
     MissingVideoDimensions(PathBuf),
@@ -52,8 +63,14 @@ impl Display for EngineError {
             Self::MissingVideoStream { asset_id } => {
                 write!(f, "video stream missing in asset {asset_id}")
             }
+            Self::MissingAudioStream { asset_id } => {
+                write!(f, "audio stream missing in asset {asset_id}")
+            }
             Self::MissingVideoRange { segment_id } => {
                 write!(f, "video range missing in segment {segment_id}")
+            }
+            Self::MissingAudioRange { segment_id } => {
+                write!(f, "audio range missing in segment {segment_id}")
             }
             Self::InvalidVideoRange {
                 segment_id,
@@ -62,6 +79,14 @@ impl Display for EngineError {
             } => write!(
                 f,
                 "invalid video range in segment {segment_id}: {src_in_video}..{src_out_video}"
+            ),
+            Self::InvalidAudioRange {
+                segment_id,
+                src_in_audio,
+                src_out_audio,
+            } => write!(
+                f,
+                "invalid audio range in segment {segment_id}: {src_in_audio}..{src_out_audio}"
             ),
             Self::MissingDuration(path) => {
                 write!(f, "media duration is missing: {}", path.display())
