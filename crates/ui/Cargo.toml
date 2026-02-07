@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 engine = { path = "../engine" }
 iced = { version = "0.13", default-features = true, features = ["image", "canvas", "advanced", "tokio"] }
+tracing-subscriber = "0.3"

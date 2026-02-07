@@ -166,11 +166,7 @@ impl Project {
         let index = match self.timeline.find_segment_index(at_tl) {
             Some(index) => index,
             None => {
-                let is_end_boundary = self.timeline.segments.iter().any(|segment| {
-                    let end = segment.timeline_start + segment.timeline_duration;
-                    at_tl == end
-                });
-                if is_end_boundary {
+                if self.timeline.is_boundary_split_point(at_tl) {
                     return Err(EngineError::SplitPointAtBoundary { at_tl });
                 }
 

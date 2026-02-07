@@ -141,7 +141,7 @@ impl Timeline {
         Ok(())
     }
 
-    fn is_boundary_split_point(&self, at_tl: i64) -> bool {
+    pub(crate) fn is_boundary_split_point(&self, at_tl: i64) -> bool {
         self.segments.iter().any(|segment| {
             let end = segment.timeline_start + segment.timeline_duration;
             at_tl == segment.timeline_start || at_tl == end

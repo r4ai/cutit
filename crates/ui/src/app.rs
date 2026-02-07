@@ -76,6 +76,7 @@ impl AppState {
             }
             Message::SplitPressed => {
                 let clamped = self.clamp_playhead(self.playhead_tl);
+                self.playhead_tl = clamped;
                 self.request_split(clamped);
                 self.queue_playhead(clamped);
             }
@@ -138,11 +139,14 @@ impl AppState {
     }
 
     fn request_split(&mut self, at_tl: i64) {
-        let clamped = self.clamp_playhead(at_tl);
-        self.playhead_tl = clamped;
-        if self.send_command(Command::Split { at_tl: clamped }) {
-            self.pending_split_tl = Some(clamped);
-            self.status = format!("split requested at {}", clamped);
+        if self.pending_split_tl.is_some() {
+            self.status = String::from("split request is already pending");
+            return;
+        }
+
+        if self.send_command(Command::Split { at_tl }) {
+            self.pending_split_tl = Some(at_tl);
+            self.status = format!("split requested at {}", at_tl);
         }
     }
 
@@ -426,6 +430,30 @@ mod tests {
 
         let refreshed = command_rx.recv().expect("refreshed set playhead command");
         assert_eq!(refreshed, Command::SetPlayhead { t_tl: 40 });
+    }
+
+    #[test]
+    fn split_requests_are_not_sent_while_another_split_is_pending() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(40));
+        let _ = command_rx.recv().expect("first set playhead command");
+
+        let _ = app.update(Message::SplitPressed);
+        let first_split = command_rx.recv().expect("first split command");
+        assert_eq!(first_split, Command::Split { at_tl: 40 });
+
+        let _ = app.update(Message::SplitPressed);
+        assert_eq!(app.status, "split request is already pending");
+        assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]
