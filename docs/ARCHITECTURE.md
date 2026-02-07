@@ -254,7 +254,7 @@ pub enum Event {
   ExportProgress { done: u64, total: u64 },
   ExportFinished { path: PathBuf },
 
-  Error(EngineError),
+  Error(EngineErrorEvent),
 }
 ```
 

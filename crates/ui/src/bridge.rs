@@ -29,29 +29,38 @@ pub fn engine_subscription() -> Subscription<BridgeEvent> {
 }
 
 fn bridge_worker_stream() -> impl iced::futures::Stream<Item = BridgeEvent> {
-    stream::channel(SUBSCRIPTION_CHANNEL_CAPACITY, |mut output| async move {
-        let (engine_tx, engine_rx) = spawn_ffmpeg_bridge();
-        let _ = output.send(BridgeEvent::Ready(engine_tx)).await;
+    bridge_worker_stream_with(spawn_ffmpeg_bridge)
+}
 
-        let (forward_tx, mut forward_rx) =
-            futures_mpsc::channel::<BridgeEvent>(SUBSCRIPTION_CHANNEL_CAPACITY);
+fn bridge_worker_stream_with(
+    spawn_bridge: fn() -> (EngineCommandSender, EngineEventReceiver),
+) -> impl iced::futures::Stream<Item = BridgeEvent> {
+    stream::channel(
+        SUBSCRIPTION_CHANNEL_CAPACITY,
+        move |mut output| async move {
+            let (engine_tx, engine_rx) = spawn_bridge();
+            let _ = output.send(BridgeEvent::Ready(engine_tx)).await;
 
-        thread::spawn(move || {
-            let mut forward_tx = forward_tx;
-            while let Ok(event) = engine_rx.recv() {
-                if executor::block_on(forward_tx.send(BridgeEvent::Event(event))).is_err() {
-                    return;
+            let (forward_tx, mut forward_rx) =
+                futures_mpsc::channel::<BridgeEvent>(SUBSCRIPTION_CHANNEL_CAPACITY);
+
+            thread::spawn(move || {
+                let mut forward_tx = forward_tx;
+                while let Ok(event) = engine_rx.recv() {
+                    if executor::block_on(forward_tx.send(BridgeEvent::Event(event))).is_err() {
+                        return;
+                    }
+                }
+                let _ = executor::block_on(forward_tx.send(BridgeEvent::Disconnected));
+            });
+
+            while let Some(event) = forward_rx.next().await {
+                if output.send(event).await.is_err() {
+                    break;
                 }
             }
-            let _ = executor::block_on(forward_tx.send(BridgeEvent::Disconnected));
-        });
-
-        while let Some(event) = forward_rx.next().await {
-            if output.send(event).await.is_err() {
-                break;
-            }
-        }
-    })
+        },
+    )
 }
 
 /// Spawns the production bridge that wires a FFmpeg-backed engine.
@@ -98,12 +107,19 @@ where
 mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
+
+    use iced::futures::{StreamExt, executor, pin_mut};
 
     use engine::Rational;
     use engine::preview::{PreviewFrame, PreviewPixelFormat, ProbedMedia, ProbedVideoStream};
 
-    use super::{Command, Engine, Event, MediaBackend, spawn_engine_bridge};
+    use super::{
+        BridgeEvent, Command, Engine, Event, MediaBackend, bridge_worker_stream_with,
+        spawn_engine_bridge,
+    };
 
     #[test]
     fn bridge_forwards_engine_events_for_import_command() {
@@ -142,6 +158,66 @@ mod tests {
             panic!("expected Event::Error");
         };
         assert!(error.message.contains("project is not loaded"));
+    }
+
+    #[test]
+    fn bridge_worker_stream_emits_ready_forwards_events_and_disconnected() {
+        let (bridge_tx, bridge_rx) = mpsc::channel::<BridgeEvent>();
+
+        thread::spawn(move || {
+            let stream = bridge_worker_stream_with(spawn_mock_bridge);
+            executor::block_on(async move {
+                pin_mut!(stream);
+                for _ in 0..4 {
+                    let Some(event) = stream.next().await else {
+                        break;
+                    };
+                    if bridge_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            });
+        });
+
+        let ready = bridge_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("ready event");
+        let BridgeEvent::Ready(command_tx) = ready else {
+            panic!("expected BridgeEvent::Ready");
+        };
+
+        command_tx
+            .send(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("send import command");
+
+        let first = bridge_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first forwarded event");
+        assert!(matches!(
+            first,
+            BridgeEvent::Event(Event::ProjectChanged(_))
+        ));
+
+        let second = bridge_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second forwarded event");
+        assert!(matches!(
+            second,
+            BridgeEvent::Event(Event::PlayheadChanged { t_tl: 0 })
+        ));
+
+        drop(command_tx);
+
+        let disconnected = bridge_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("disconnected event");
+        assert!(matches!(disconnected, BridgeEvent::Disconnected));
+    }
+
+    fn spawn_mock_bridge() -> (super::EngineCommandSender, super::EngineEventReceiver) {
+        spawn_engine_bridge(Engine::new(MockBackend))
     }
 
     #[derive(Debug, Clone, Copy)]
