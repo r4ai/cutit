@@ -49,7 +49,13 @@ fn playhead_x_from_tick(playhead_tl: i64, duration_tl: i64, width: f32) -> f32 {
         return 0.0;
     }
 
-    (playhead_tl.clamp(0, duration_tl - 1) as f32 / duration_tl as f32) * width
+    let max_tick = duration_tl - 1;
+    let clamped_tick = playhead_tl.clamp(0, max_tick);
+    if clamped_tick == max_tick {
+        return width;
+    }
+
+    (clamped_tick as f32 / duration_tl as f32) * width
 }
 
 impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
@@ -228,7 +234,12 @@ mod tests {
 
     #[test]
     fn playhead_x_uses_same_duration_scale_as_tick_mapping() {
-        assert_eq!(playhead_x_from_tick(1, 2, 200.0), 100.0);
+        assert_eq!(playhead_x_from_tick(1, 2, 200.0), 200.0);
+    }
+
+    #[test]
+    fn non_last_tick_keeps_proportional_position() {
+        assert_eq!(playhead_x_from_tick(1, 4, 200.0), 50.0);
     }
 
     #[test]

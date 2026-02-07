@@ -170,6 +170,8 @@ impl AppState {
                 self.playhead_tl = self.clamp_playhead(self.playhead_tl);
                 self.preview_image = None;
                 self.timeline_cache.clear();
+                self.pending_playhead_tl = None;
+                self.playhead_request_in_flight = false;
                 self.status = String::from("project loaded");
             }
             Event::PlayheadChanged { t_tl } => {
@@ -281,6 +283,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::sync::mpsc::TryRecvError;
+    use std::time::Duration;
 
     use engine::{Command, Event, ProjectSnapshot};
 
@@ -450,5 +453,29 @@ mod tests {
 
         let set_playhead = command_rx.recv().expect("set playhead command");
         assert_eq!(set_playhead, Command::SetPlayhead { t_tl: 99 });
+    }
+
+    #[test]
+    fn project_changed_resets_in_flight_state_and_allows_new_scrub_dispatch() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+
+        let _ = app.update(Message::TimelineScrubbed(0));
+        let first = command_rx.recv().expect("first set playhead command");
+        assert_eq!(first, Command::SetPlayhead { t_tl: 0 });
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+        let _ = app.update(Message::TimelineScrubbed(60));
+
+        let second = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second set playhead command");
+        assert_eq!(second, Command::SetPlayhead { t_tl: 60 });
     }
 }
