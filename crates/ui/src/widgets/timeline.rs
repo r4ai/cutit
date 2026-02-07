@@ -43,6 +43,7 @@ struct TimelineProgram<'a, Message> {
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
     on_split: fn(i64) -> Message,
+    on_cut: fn(i64) -> Message,
 }
 
 fn playhead_x_from_tick(playhead_tl: i64, duration_tl: i64, width: f32) -> f32 {
@@ -134,6 +135,13 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 };
                 let tick = tick_from_x(x, bounds.width, self.duration_tl);
                 (canvas::event::Status::Captured, Some((self.on_split)(tick)))
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) => {
+                let Some(x) = cursor_x else {
+                    return (canvas::event::Status::Ignored, None);
+                };
+                let tick = tick_from_x(x, bounds.width, self.duration_tl);
+                (canvas::event::Status::Captured, Some((self.on_cut)(tick)))
             }
             _ => (canvas::event::Status::Ignored, None),
         }
@@ -233,6 +241,7 @@ pub fn view<'a, Message>(
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
     on_split: fn(i64) -> Message,
+    on_cut: fn(i64) -> Message,
 ) -> Element<'a, Message>
 where
     Message: 'a,
@@ -251,6 +260,7 @@ where
             cache,
             on_scrub,
             on_split,
+            on_cut,
         })
         .width(Length::Fill)
         .height(Length::Fixed(56.0)),
@@ -353,6 +363,7 @@ mod tests {
             cache: &cache,
             on_scrub: |_| (),
             on_split: |_| (),
+            on_cut: |_| (),
         };
         let interaction = program.mouse_interaction(
             &TimelineState::default(),
@@ -379,6 +390,7 @@ mod tests {
             cache: &cache,
             on_scrub: |_| (),
             on_split: |_| (),
+            on_cut: |_| (),
         };
         let interaction = program.mouse_interaction(
             &TimelineState::default(),
@@ -405,6 +417,7 @@ mod tests {
             cache: &cache,
             on_scrub: |tick| tick,
             on_split: |_| -1,
+            on_cut: |_| -2,
         };
         let bounds = Rectangle {
             x: 0.0,
@@ -448,6 +461,7 @@ mod tests {
             cache: &cache,
             on_scrub: |tick| tick,
             on_split: |_| -1,
+            on_cut: |_| -2,
         };
         let bounds = Rectangle {
             x: 0.0,
@@ -480,6 +494,7 @@ mod tests {
             cache: &cache,
             on_scrub: |_| -1,
             on_split: |tick| tick,
+            on_cut: |_| -2,
         };
         let bounds = Rectangle {
             x: 0.0,
@@ -492,6 +507,70 @@ mod tests {
         let (status, message) = program.update(
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)),
+            bounds,
+            mouse::Cursor::Available(Point::new(-10.0, 10.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Ignored);
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn middle_click_on_timeline_dispatches_cut() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |_| -1,
+            on_split: |_| -2,
+            on_cut: |tick| tick,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (status, message) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)),
+            bounds,
+            mouse::Cursor::Available(Point::new(25.0, 10.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Captured);
+        assert_eq!(message, Some(25));
+    }
+
+    #[test]
+    fn middle_click_outside_timeline_does_not_cut() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |_| -1,
+            on_split: |_| -2,
+            on_cut: |tick| tick,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (status, message) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)),
             bounds,
             mouse::Cursor::Available(Point::new(-10.0, 10.0)),
         );

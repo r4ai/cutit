@@ -266,6 +266,21 @@ impl Project {
         )
     }
 
+    /// Cuts one segment at `at_tl` and closes the timeline gap.
+    ///
+    /// When `at_tl` points to a segment start boundary, the segment starting
+    /// at that boundary is removed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut project = /* construct project */;
+    /// project.cut(500_000).unwrap();
+    /// ```
+    pub fn cut(&mut self, at_tl: i64) -> Result<()> {
+        let _ = self.timeline.cut_segment(at_tl)?;
+        Ok(())
+    }
+
     fn asset_by_id(&self, asset_id: AssetId) -> Result<&MediaAsset> {
         self.assets
             .iter()

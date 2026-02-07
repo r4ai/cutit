@@ -31,6 +31,22 @@ pub enum Command {
     Split {
         at_tl: i64,
     },
+    /// Cuts the segment at `at_tl` in timeline ticks.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use std::path::PathBuf;
+    /// use engine::{Command, Engine, FfmpegMediaBackend};
+    ///
+    /// let mut engine = Engine::new(FfmpegMediaBackend);
+    /// let _ = engine.handle_command(Command::Import {
+    ///     path: PathBuf::from("demo.mp4"),
+    /// });
+    /// let _ = engine.handle_command(Command::Cut { at_tl: 500_000 });
+    /// ```
+    Cut {
+        at_tl: i64,
+    },
     Export {
         path: PathBuf,
         settings: ExportSettings,
@@ -156,6 +172,7 @@ where
             Command::Import { path } => self.import(path),
             Command::SetPlayhead { t_tl } => self.set_playhead(t_tl),
             Command::Split { at_tl } => self.split(at_tl),
+            Command::Cut { at_tl } => self.cut(at_tl),
             Command::Export { path, settings } => self.export(path, settings),
             Command::CancelExport => Ok(Vec::new()),
         }
@@ -214,6 +231,24 @@ where
             next_segment_id,
             segment_count = project.timeline.segments.len(),
             "split applied"
+        );
+
+        Ok(vec![Event::ProjectChanged(project.snapshot())])
+    }
+
+    fn cut(&mut self, at_tl: i64) -> Result<Vec<Event>> {
+        {
+            let project = self.project.as_mut().ok_or(EngineError::ProjectNotLoaded)?;
+            project.cut(at_tl)?;
+        }
+        let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
+        self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
+
+        info!(
+            at_tl,
+            segment_count = project.timeline.segments.len(),
+            playhead_tl = self.playhead_tl,
+            "cut applied"
         );
 
         Ok(vec![Event::ProjectChanged(project.snapshot())])
@@ -377,6 +412,77 @@ mod tests {
             end,
             Err(crate::error::EngineError::SplitPointAtBoundary { at_tl: 1_200_000 })
         ));
+    }
+
+    #[test]
+    fn cut_at_split_boundary_removes_right_segment() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 333_333 })
+            .expect("split should succeed");
+
+        let events = engine
+            .handle_command(Command::Cut { at_tl: 333_333 })
+            .expect("cut should succeed");
+        let Event::ProjectChanged(snapshot) = &events[0] else {
+            panic!("cut must emit ProjectChanged");
+        };
+
+        assert_eq!(snapshot.duration_tl, 333_333);
+        assert_eq!(snapshot.segments.len(), 1);
+        assert_eq!(snapshot.segments[0].timeline_start, 0);
+        assert_eq!(snapshot.segments[0].timeline_duration, 333_333);
+        assert_eq!(snapshot.segments[0].src_in_video, Some(90_000));
+        assert_eq!(snapshot.segments[0].src_out_video, Some(120_000));
+        assert_eq!(snapshot.segments[0].src_in_audio, Some(48_000));
+        assert_eq!(snapshot.segments[0].src_out_audio, Some(64_000));
+    }
+
+    #[test]
+    fn cut_middle_segment_shifts_following_segments_left() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 300_000 })
+            .expect("first split should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 900_000 })
+            .expect("second split should succeed");
+
+        let events = engine
+            .handle_command(Command::Cut { at_tl: 500_000 })
+            .expect("cut should succeed");
+        let Event::ProjectChanged(snapshot) = &events[0] else {
+            panic!("cut must emit ProjectChanged");
+        };
+
+        assert_eq!(snapshot.duration_tl, 600_000);
+        assert_eq!(snapshot.segments.len(), 2);
+
+        let first = &snapshot.segments[0];
+        assert_eq!(first.timeline_start, 0);
+        assert_eq!(first.timeline_duration, 300_000);
+        assert_eq!(first.src_in_video, Some(90_000));
+        assert_eq!(first.src_out_video, Some(117_000));
+        assert_eq!(first.src_in_audio, Some(48_000));
+        assert_eq!(first.src_out_audio, Some(62_400));
+
+        let second = &snapshot.segments[1];
+        assert_eq!(second.timeline_start, 300_000);
+        assert_eq!(second.timeline_duration, 300_000);
+        assert_eq!(second.src_in_video, Some(171_000));
+        assert_eq!(second.src_out_video, Some(198_000));
+        assert_eq!(second.src_in_audio, Some(91_200));
+        assert_eq!(second.src_out_audio, Some(105_600));
     }
 
     #[test]

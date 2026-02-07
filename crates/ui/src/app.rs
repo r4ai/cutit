@@ -17,8 +17,10 @@ pub enum Message {
     ExportPathChanged(String),
     ExportPressed,
     SplitPressed,
+    CutPressed,
     TimelineScrubbed(i64),
     TimelineSplitRequested(i64),
+    TimelineCutRequested(i64),
     Bridge(BridgeEvent),
 }
 
@@ -33,6 +35,7 @@ pub struct AppState {
     pending_playhead_tl: Option<i64>,
     playhead_request_in_flight: bool,
     pending_split_tl: Option<i64>,
+    pending_cut_tl: Option<i64>,
     last_split_tl: Option<i64>,
     timeline_cache: canvas::Cache,
     status: String,
@@ -52,6 +55,7 @@ impl AppState {
                 pending_playhead_tl: None,
                 playhead_request_in_flight: false,
                 pending_split_tl: None,
+                pending_cut_tl: None,
                 last_split_tl: None,
                 timeline_cache: canvas::Cache::new(),
                 status: String::from("starting engine bridge"),
@@ -74,6 +78,7 @@ impl AppState {
                     path: PathBuf::from(&path),
                 }) {
                     self.pending_split_tl = None;
+                    self.pending_cut_tl = None;
                     self.last_split_tl = None;
                     self.status = format!("importing {}", path);
                 }
@@ -98,6 +103,12 @@ impl AppState {
                 self.request_split(clamped);
                 self.queue_playhead(clamped);
             }
+            Message::CutPressed => {
+                let clamped = self.clamp_playhead(self.playhead_tl);
+                self.playhead_tl = clamped;
+                self.request_cut(clamped);
+                self.queue_playhead(clamped);
+            }
             Message::TimelineScrubbed(t_tl) => {
                 let clamped = self.clamp_playhead(t_tl);
                 self.playhead_tl = clamped;
@@ -107,6 +118,12 @@ impl AppState {
                 let clamped = self.clamp_playhead(at_tl);
                 self.playhead_tl = clamped;
                 self.request_split(clamped);
+                self.queue_playhead(clamped);
+            }
+            Message::TimelineCutRequested(at_tl) => {
+                let clamped = self.clamp_playhead(at_tl);
+                self.playhead_tl = clamped;
+                self.request_cut(clamped);
                 self.queue_playhead(clamped);
             }
             Message::Bridge(BridgeEvent::Ready(sender)) => {
@@ -123,6 +140,7 @@ impl AppState {
                 self.pending_playhead_tl = None;
                 self.playhead_request_in_flight = false;
                 self.pending_split_tl = None;
+                self.pending_cut_tl = None;
                 self.last_split_tl = None;
             }
         }
@@ -161,10 +179,30 @@ impl AppState {
             self.status = String::from("split request is already pending");
             return;
         }
+        if self.pending_cut_tl.is_some() {
+            self.status = String::from("cut request is already pending");
+            return;
+        }
 
         if self.send_command(Command::Split { at_tl }) {
             self.pending_split_tl = Some(at_tl);
             self.status = format!("split requested at {}", at_tl);
+        }
+    }
+
+    fn request_cut(&mut self, at_tl: i64) {
+        if self.pending_cut_tl.is_some() {
+            self.status = String::from("cut request is already pending");
+            return;
+        }
+        if self.pending_split_tl.is_some() {
+            self.status = String::from("split request is already pending");
+            return;
+        }
+
+        if self.send_command(Command::Cut { at_tl }) {
+            self.pending_cut_tl = Some(at_tl);
+            self.status = format!("cut requested at {}", at_tl);
         }
     }
 
@@ -208,9 +246,13 @@ impl AppState {
                 self.pending_playhead_tl = None;
                 self.playhead_request_in_flight = false;
                 self.last_split_tl = None;
-                if let Some(split_tl) = self.pending_split_tl.take() {
+                let pending_split_tl = self.pending_split_tl.take();
+                let pending_cut_tl = self.pending_cut_tl.take();
+                if let Some(split_tl) = pending_split_tl {
                     self.last_split_tl = Some(split_tl);
                     self.status = format!("split applied at {}", split_tl);
+                } else if let Some(cut_tl) = pending_cut_tl {
+                    self.status = format!("cut applied at {}", cut_tl);
                 } else {
                     self.status = String::from("project loaded");
                 }
@@ -251,6 +293,13 @@ impl AppState {
                     } else {
                         self.status = format!("error: {}", error.message);
                     }
+                } else if let Some(cut_tl) = self.pending_cut_tl {
+                    if self.is_cut_error(&error.kind) {
+                        self.pending_cut_tl = None;
+                        self.status = format!("cut skipped at {}: {}", cut_tl, error.message);
+                    } else {
+                        self.status = format!("error: {}", error.message);
+                    }
                 } else {
                     self.status = format!("error: {}", error.message);
                 }
@@ -274,6 +323,10 @@ impl AppState {
         )
     }
 
+    fn is_cut_error(&self, kind: &EngineErrorKind) -> bool {
+        matches!(kind, EngineErrorKind::SegmentNotFound)
+    }
+
     fn clamp_playhead(&self, t_tl: i64) -> i64 {
         match self.project.as_ref() {
             Some(snapshot) => {
@@ -294,6 +347,7 @@ impl AppState {
             text_input("media path", &self.import_path).on_input(Message::ImportPathChanged),
             button("Import").on_press(Message::ImportPressed),
             button("Split").on_press(Message::SplitPressed),
+            button("Cut").on_press(Message::CutPressed),
         ]
         .spacing(12);
         let export_row = row![
@@ -313,6 +367,7 @@ impl AppState {
             &self.timeline_cache,
             Message::TimelineScrubbed,
             Message::TimelineSplitRequested,
+            Message::TimelineCutRequested,
         );
 
         let controls = column![
@@ -353,6 +408,7 @@ impl AppState {
             pending_playhead_tl: None,
             playhead_request_in_flight: false,
             pending_split_tl: None,
+            pending_cut_tl: None,
             last_split_tl: None,
             timeline_cache: canvas::Cache::new(),
             status: String::from("idle"),
@@ -460,6 +516,19 @@ mod tests {
 
         let command = command_rx.recv().expect("split command");
         assert_eq!(command, Command::Split { at_tl: 250_000 });
+    }
+
+    #[test]
+    fn cut_button_dispatches_cut_at_current_playhead() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::TimelineScrubbed(250_000));
+        let _ = command_rx.recv().expect("set playhead command");
+
+        let _ = app.update(Message::CutPressed);
+
+        let command = command_rx.recv().expect("cut command");
+        assert_eq!(command, Command::Cut { at_tl: 250_000 });
     }
 
     #[test]
@@ -654,6 +723,27 @@ mod tests {
 
         let split = command_rx.recv().expect("split command");
         assert_eq!(split, Command::Split { at_tl: 99 });
+
+        let set_playhead = command_rx.recv().expect("set playhead command");
+        assert_eq!(set_playhead, Command::SetPlayhead { t_tl: 99 });
+    }
+
+    #[test]
+    fn timeline_cut_requested_dispatches_cut_command() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineCutRequested(100));
+
+        let cut = command_rx.recv().expect("cut command");
+        assert_eq!(cut, Command::Cut { at_tl: 99 });
 
         let set_playhead = command_rx.recv().expect("set playhead command");
         assert_eq!(set_playhead, Command::SetPlayhead { t_tl: 99 });
