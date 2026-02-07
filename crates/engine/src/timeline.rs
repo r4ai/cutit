@@ -50,7 +50,7 @@ impl Timeline {
     ///
     /// # Example
     /// ```ignore
-    /// use engine::{Rational, Segment, Timeline};
+    /// use engine::{Rational, timeline::{Segment, Timeline}};
     ///
     /// let mut timeline = Timeline {
     ///     segments: vec![Segment {
