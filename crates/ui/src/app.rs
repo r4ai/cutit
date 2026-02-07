@@ -75,7 +75,9 @@ impl AppState {
                 }
             }
             Message::SplitPressed => {
-                self.request_split(self.playhead_tl);
+                let clamped = self.clamp_playhead(self.playhead_tl);
+                self.request_split(clamped);
+                self.queue_playhead(clamped);
             }
             Message::TimelineScrubbed(t_tl) => {
                 let clamped = self.clamp_playhead(t_tl);
@@ -387,6 +389,43 @@ mod tests {
 
         let command = command_rx.recv().expect("split command");
         assert_eq!(command, Command::Split { at_tl: 250_000 });
+    }
+
+    #[test]
+    fn split_button_queues_playhead_refresh_after_in_flight_preview() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(40));
+        let first = command_rx.recv().expect("first set playhead command");
+        assert_eq!(first, Command::SetPlayhead { t_tl: 40 });
+
+        let _ = app.update(Message::SplitPressed);
+        let split = command_rx.recv().expect("split command");
+        assert_eq!(split, Command::Split { at_tl: 40 });
+        assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 40,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 4]),
+                },
+            },
+        )));
+
+        let refreshed = command_rx.recv().expect("refreshed set playhead command");
+        assert_eq!(refreshed, Command::SetPlayhead { t_tl: 40 });
     }
 
     #[test]
