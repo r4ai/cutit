@@ -238,7 +238,7 @@ UI issues commands; engine emits events (including progress and errors).
 pub enum Command {
   Import { path: PathBuf },
 
-  SetPlayhead { t_tl: i64 },    // timeline ticks
+  SetPlayhead { t_tl: i64 },    // timeline ticks, clamped to [0, duration_tl - 1]
   Split { at_tl: i64 },
 
   Export { path: PathBuf, settings: ExportSettings },
@@ -517,6 +517,7 @@ Use `Canvas` for:
 MVP interaction model:
 - timeline emits `Message::TimelineScrubbed(t_tl)`
 - UI update coalesces scrub updates and sends at most one in-flight `Command::SetPlayhead { t_tl }`
+- UI playhead and timeline slider both clamp to `[0, duration_tl - 1]` (when `duration_tl > 0`)
 - engine emits `PreviewFrameReady { t_tl, frame }` asynchronously
 
 ### 8.6 File dialogs + export progress UI (Tasks + events)

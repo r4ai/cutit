@@ -180,7 +180,14 @@ impl AppState {
 
     fn clamp_playhead(&self, t_tl: i64) -> i64 {
         match self.project.as_ref() {
-            Some(snapshot) => cmp::max(0, cmp::min(t_tl, snapshot.duration_tl)),
+            Some(snapshot) => {
+                let max_tick = if snapshot.duration_tl <= 0 {
+                    0
+                } else {
+                    snapshot.duration_tl - 1
+                };
+                t_tl.clamp(0, max_tick)
+            }
             None => cmp::max(0, t_tl),
         }
     }
@@ -190,7 +197,13 @@ impl AppState {
         let max_playhead = self
             .project
             .as_ref()
-            .map(|snapshot| snapshot.duration_tl)
+            .map(|snapshot| {
+                if snapshot.duration_tl <= 0 {
+                    0
+                } else {
+                    snapshot.duration_tl - 1
+                }
+            })
             .unwrap_or(0);
 
         let import_row = row![
@@ -249,7 +262,7 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::mpsc::TryRecvError;
 
-    use engine::{Command, Event};
+    use engine::{Command, Event, ProjectSnapshot};
 
     use crate::bridge::BridgeEvent;
 
@@ -281,6 +294,24 @@ mod tests {
 
         let command = command_rx.recv().expect("set playhead command");
         assert_eq!(command, Command::SetPlayhead { t_tl: 42 });
+    }
+
+    #[test]
+    fn timeline_scrub_clamps_to_last_timeline_tick() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(100.0));
+
+        let command = command_rx.recv().expect("set playhead command");
+        assert_eq!(command, Command::SetPlayhead { t_tl: 99 });
     }
 
     #[test]
