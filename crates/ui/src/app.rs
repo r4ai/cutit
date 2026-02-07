@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::{cmp, sync::mpsc::TrySendError};
 
-use engine::{Command, Event, ProjectSnapshot};
+use engine::{Command, EngineErrorKind, Event, ProjectSnapshot};
 use iced::widget::canvas;
 use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Length, Subscription, Task};
@@ -226,7 +226,7 @@ impl AppState {
             }
             Event::Error(error) => {
                 if let Some(split_tl) = self.pending_split_tl {
-                    if self.is_split_error_message(&error.message) {
+                    if self.is_split_error(&error.kind) {
                         self.pending_split_tl = None;
                         self.last_split_tl = None;
                         self.status = format!("split skipped at {}: {}", split_tl, error.message);
@@ -249,9 +249,11 @@ impl AppState {
         }
     }
 
-    fn is_split_error_message(&self, message: &str) -> bool {
-        message.starts_with("cannot split at segment boundary")
-            || message.starts_with("segment not found at timeline timestamp")
+    fn is_split_error(&self, kind: &EngineErrorKind) -> bool {
+        matches!(
+            kind,
+            EngineErrorKind::SplitPointAtBoundary | EngineErrorKind::SegmentNotFound
+        )
     }
 
     fn clamp_playhead(&self, t_tl: i64) -> i64 {
@@ -677,6 +679,7 @@ mod tests {
 
         let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::Error(
             engine::EngineErrorEvent {
+                kind: engine::EngineErrorKind::SplitPointAtBoundary,
                 message: "cannot split at segment boundary: 99".to_owned(),
             },
         ))));
@@ -720,6 +723,7 @@ mod tests {
         let _ = command_rx.recv().expect("split command");
         let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::Error(
             engine::EngineErrorEvent {
+                kind: engine::EngineErrorKind::SplitPointAtBoundary,
                 message: "cannot split at segment boundary: 99".to_owned(),
             },
         ))));
@@ -746,6 +750,7 @@ mod tests {
 
         let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::Error(
             engine::EngineErrorEvent {
+                kind: engine::EngineErrorKind::Other,
                 message: "media backend error: decode failed".to_owned(),
             },
         ))));
@@ -762,6 +767,34 @@ mod tests {
         ))));
         assert_eq!(app.pending_split_tl, None);
         assert_eq!(app.last_split_tl, Some(42));
+    }
+
+    #[test]
+    fn split_like_error_message_is_ignored_when_error_kind_is_other() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(50));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::SplitPressed);
+        let _ = command_rx.recv().expect("split command");
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::Error(
+            engine::EngineErrorEvent {
+                kind: engine::EngineErrorKind::Other,
+                message: "cannot split at segment boundary: 50".to_owned(),
+            },
+        ))));
+
+        assert_eq!(app.status, "error: cannot split at segment boundary: 50");
+        assert_eq!(app.pending_split_tl, Some(50));
     }
 
     #[test]

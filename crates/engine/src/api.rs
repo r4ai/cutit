@@ -50,9 +50,37 @@ pub enum Event {
 }
 
 /// User-facing error payload emitted as an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineErrorKind {
+    SplitPointAtBoundary,
+    SegmentNotFound,
+    Other,
+}
+
+impl From<&EngineError> for EngineErrorKind {
+    fn from(value: &EngineError) -> Self {
+        match value {
+            EngineError::SplitPointAtBoundary { .. } => Self::SplitPointAtBoundary,
+            EngineError::SegmentNotFound { .. } => Self::SegmentNotFound,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// User-facing error payload emitted as an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineErrorEvent {
+    pub kind: EngineErrorKind,
     pub message: String,
+}
+
+impl EngineErrorEvent {
+    pub fn from_error(error: &EngineError) -> Self {
+        Self {
+            kind: EngineErrorKind::from(error),
+            message: error.to_string(),
+        }
+    }
 }
 
 /// Export settings for video-only MVP export.
@@ -169,10 +197,17 @@ where
     }
 
     fn split(&mut self, at_tl: i64) -> Result<Vec<Event>> {
-        let project = self.project.as_mut().ok_or(EngineError::ProjectNotLoaded)?;
         let next_segment_id = self.next_segment_id;
-        project.split(at_tl, next_segment_id)?;
-        self.next_segment_id += 1;
+        {
+            let project = self.project.as_mut().ok_or(EngineError::ProjectNotLoaded)?;
+            project.split(at_tl, next_segment_id)?;
+        }
+        let allocated_segment_id = self.allocate_segment_id();
+        debug_assert_eq!(
+            allocated_segment_id, next_segment_id,
+            "allocated segment id diverged from the split request id"
+        );
+        let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
 
         info!(
             at_tl,

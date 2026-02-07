@@ -88,9 +88,7 @@ where
                 }
                 Err(error) => {
                     if event_tx
-                        .send(Event::Error(EngineErrorEvent {
-                            message: error.to_string(),
-                        }))
+                        .send(Event::Error(EngineErrorEvent::from_error(&error)))
                         .is_err()
                     {
                         return;
@@ -157,6 +155,7 @@ mod tests {
         let Event::Error(error) = event else {
             panic!("expected Event::Error");
         };
+        assert_eq!(error.kind, engine::EngineErrorKind::Other);
         assert!(error.message.contains("project is not loaded"));
     }
 
