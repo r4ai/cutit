@@ -153,7 +153,7 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if cursor.is_over(bounds) {
+        if self.duration_tl > 0 && cursor.is_over(bounds) {
             mouse::Interaction::Pointer
         } else {
             mouse::Interaction::None
@@ -195,6 +195,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use iced::widget::canvas::Program;
+    use iced::{Point, Rectangle, mouse};
+
+    use super::{TimelineProgram, TimelineState};
     use super::{playhead_x_from_tick, tick_from_x};
 
     #[test]
@@ -225,5 +229,55 @@ mod tests {
     #[test]
     fn playhead_x_uses_same_duration_scale_as_tick_mapping() {
         assert_eq!(playhead_x_from_tick(1, 2, 200.0), 100.0);
+    }
+
+    #[test]
+    fn mouse_interaction_is_none_when_timeline_is_empty() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 0,
+            playhead_tl: 0,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |_| (),
+            on_split: |_| (),
+        };
+        let interaction = program.mouse_interaction(
+            &TimelineState::default(),
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 40.0,
+            },
+            mouse::Cursor::Available(Point::new(20.0, 10.0)),
+        );
+
+        assert_eq!(interaction, mouse::Interaction::None);
+    }
+
+    #[test]
+    fn mouse_interaction_is_pointer_when_timeline_is_interactive() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 10,
+            playhead_tl: 0,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |_| (),
+            on_split: |_| (),
+        };
+        let interaction = program.mouse_interaction(
+            &TimelineState::default(),
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 40.0,
+            },
+            mouse::Cursor::Available(Point::new(20.0, 10.0)),
+        );
+
+        assert_eq!(interaction, mouse::Interaction::Pointer);
     }
 }

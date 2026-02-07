@@ -181,7 +181,7 @@ impl AppState {
                 self.status = if self.preview_image.is_some() {
                     format!("preview ready at {}", self.playhead_tl)
                 } else {
-                    String::from("preview frame dropped: unsupported format")
+                    String::from("preview frame dropped: unsupported format or invalid frame data")
                 };
                 self.playhead_request_in_flight = false;
                 self.flush_playhead_request();
@@ -406,6 +406,29 @@ mod tests {
         )));
 
         assert!(app.preview_image.is_some());
+    }
+
+    #[test]
+    fn bridge_preview_frame_ready_with_invalid_rgba_data_sets_generic_drop_status() {
+        let (command_tx, _command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 12,
+                frame: engine::PreviewFrame {
+                    width: 2,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 3]),
+                },
+            },
+        )));
+
+        assert_eq!(
+            app.status,
+            "preview frame dropped: unsupported format or invalid frame data"
+        );
     }
 
     #[test]
