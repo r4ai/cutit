@@ -59,6 +59,26 @@ fn playhead_x_from_tick(playhead_tl: i64, duration_tl: i64, width: f32) -> f32 {
     (clamped_tick as f32 / duration_tl as f32) * width
 }
 
+fn split_boundary_ticks(segments: &[SegmentSummary], duration_tl: i64) -> Vec<i64> {
+    if duration_tl <= 0 {
+        return Vec::new();
+    }
+
+    let mut ticks = Vec::new();
+    for segment in segments {
+        let tick = segment.timeline_start;
+        if tick <= 0 || tick >= duration_tl {
+            continue;
+        }
+
+        if ticks.last().copied() != Some(tick) {
+            ticks.push(tick);
+        }
+    }
+
+    ticks
+}
+
 impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
     type State = TimelineState;
 
@@ -141,6 +161,20 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
 
         let mut playhead_frame = canvas::Frame::new(renderer, bounds.size());
         if self.duration_tl > 0 {
+            for split_tl in split_boundary_ticks(self.segments, self.duration_tl) {
+                let split_x = playhead_x_from_tick(split_tl, self.duration_tl, bounds.width);
+                let split_line = Path::line(
+                    Point::new(split_x, 8.0),
+                    Point::new(split_x, (bounds.height - 8.0).max(8.0)),
+                );
+                playhead_frame.stroke(
+                    &split_line,
+                    Stroke::default()
+                        .with_width(1.0)
+                        .with_color(Color::from_rgb8(196, 206, 220)),
+                );
+            }
+
             if let Some(split_tl) = self.split_feedback_tl {
                 let split_x = playhead_x_from_tick(split_tl, self.duration_tl, bounds.width);
                 let split_line = Path::line(
@@ -218,11 +252,25 @@ where
 
 #[cfg(test)]
 mod tests {
+    use engine::api::SegmentSummary;
     use iced::widget::canvas::Program;
     use iced::{Point, Rectangle, mouse};
 
     use super::{TimelineProgram, TimelineState};
-    use super::{playhead_x_from_tick, tick_from_x};
+    use super::{playhead_x_from_tick, split_boundary_ticks, tick_from_x};
+
+    fn sample_segment(id: u64, timeline_start: i64, timeline_duration: i64) -> SegmentSummary {
+        SegmentSummary {
+            id,
+            asset_id: 1,
+            timeline_start,
+            timeline_duration,
+            src_in_video: None,
+            src_out_video: None,
+            src_in_audio: None,
+            src_out_audio: None,
+        }
+    }
 
     #[test]
     fn maps_left_edge_to_zero() {
@@ -257,6 +305,31 @@ mod tests {
     #[test]
     fn non_last_tick_keeps_proportional_position() {
         assert_eq!(playhead_x_from_tick(1, 4, 200.0), 50.0);
+    }
+
+    #[test]
+    fn split_boundaries_include_all_non_zero_segment_starts() {
+        let segments = vec![
+            sample_segment(1, 0, 100),
+            sample_segment(2, 100, 100),
+            sample_segment(3, 250, 150),
+        ];
+
+        assert_eq!(split_boundary_ticks(&segments, 400), vec![100, 250]);
+    }
+
+    #[test]
+    fn split_boundaries_skip_out_of_range_and_duplicate_starts() {
+        let segments = vec![
+            sample_segment(1, -10, 10),
+            sample_segment(2, 0, 100),
+            sample_segment(3, 100, 100),
+            sample_segment(4, 100, 100),
+            sample_segment(5, 400, 100),
+            sample_segment(6, 500, 100),
+        ];
+
+        assert_eq!(split_boundary_ticks(&segments, 400), vec![100]);
     }
 
     #[test]
