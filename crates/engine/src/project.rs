@@ -312,7 +312,14 @@ impl Project {
         }
 
         let mut expected_start = 0_i64;
+        let mut seen_segment_ids = HashSet::new();
         for segment in &self.timeline.segments {
+            if !seen_segment_ids.insert(segment.id) {
+                return Err(EngineError::InvalidProjectFile {
+                    reason: format!("duplicate segment id {}", segment.id),
+                });
+            }
+
             if segment.timeline_start != expected_start {
                 return Err(EngineError::InvalidProjectFile {
                     reason: format!(
@@ -466,6 +473,7 @@ mod tests {
         AudioStreamInfo, MediaAsset, Project, ProjectExportSettings, ProjectSettings,
         VideoStreamInfo, normalize_playhead,
     };
+    use crate::error::EngineError;
     use crate::time::Rational;
     use crate::timeline::{Segment, Timeline};
 
@@ -488,11 +496,20 @@ mod tests {
 
         project.save_to_file(&path).expect("save should succeed");
         let text = fs::read_to_string(&path).expect("persisted json must be readable");
+        let json: serde_json::Value = serde_json::from_str(&text).expect("json should be valid");
 
-        assert!(text.contains("\"video_stream_index\": 3"));
-        assert!(text.contains("\"audio_stream_index\": 7"));
-        assert!(text.contains("\"export_settings\""));
-        assert!(text.contains("\"container\": \"mp4\""));
+        assert_eq!(
+            json["assets"][0]["video_stream_index"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
+            json["assets"][0]["audio_stream_index"],
+            serde_json::json!(7)
+        );
+        assert_eq!(
+            json["settings"]["export_settings"]["container"],
+            serde_json::json!("mp4")
+        );
         fs::remove_file(path).expect("cleanup persisted file");
     }
 
@@ -516,6 +533,81 @@ mod tests {
         assert_eq!(loaded.timeline.segments[0].src_out_video, Some(90_000));
         assert_eq!(loaded.timeline.segments[0].src_in_audio, Some(48_000));
         assert_eq!(loaded.timeline.segments[0].src_out_audio, Some(48_000));
+        fs::remove_file(path).expect("cleanup persisted file");
+    }
+
+    #[test]
+    fn project_persistence_rejects_duplicate_segment_ids() {
+        let mut project = sample_project();
+        project.timeline.segments.push(Segment {
+            id: 1,
+            asset_id: 1,
+            src_in_video: Some(198_000),
+            src_out_video: Some(198_001),
+            src_in_audio: Some(105_600),
+            src_out_audio: Some(105_601),
+            timeline_start: 1_200_000,
+            timeline_duration: 1,
+        });
+
+        let result = project.save_to_file(temp_file_path("duplicate-segment-id", "json"));
+        assert!(matches!(
+            result,
+            Err(EngineError::InvalidProjectFile { .. })
+        ));
+    }
+
+    #[test]
+    fn load_project_rejects_invalid_rational_in_json() {
+        let path = temp_file_path("invalid-rational-project", "json");
+        let invalid = serde_json::json!({
+            "schema_version": 1,
+            "assets": [{
+                "id": 1,
+                "path": "assets/demo.mp4",
+                "video_stream_index": 3,
+                "audio_stream_index": 7,
+                "video": {
+                    "time_base": { "num": 1, "den": 0 },
+                    "width": 1920,
+                    "height": 1080
+                },
+                "audio": {
+                    "time_base": { "num": 1, "den": 48000 },
+                    "sample_rate": 48000,
+                    "channels": 2
+                },
+                "duration_tl": 1200000
+            }],
+            "segments": [{
+                "id": 1,
+                "asset_id": 1,
+                "src_in_video": 90000,
+                "src_out_video": 198000,
+                "src_in_audio": 48000,
+                "src_out_audio": 105600,
+                "timeline_start": 0,
+                "timeline_duration": 1200000
+            }],
+            "settings": {
+                "export_settings": {
+                    "container": "mp4",
+                    "video_codec": "h264",
+                    "audio_codec": "aac"
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&invalid).expect("valid json"),
+        )
+        .expect("write invalid project json");
+
+        let result = Project::load_from_file(&path);
+        assert!(matches!(
+            result,
+            Err(EngineError::ProjectSerialization { .. })
+        ));
         fs::remove_file(path).expect("cleanup persisted file");
     }
 
