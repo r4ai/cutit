@@ -1,5 +1,6 @@
 use crate::error::{EngineError, Result};
 use crate::time::{Rational, TIMELINE_TIME_BASE, rescale};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 /// Opaque identifier for timeline segments.
@@ -8,13 +9,13 @@ pub type SegmentId = u64;
 pub type AssetId = u64;
 
 /// Single-track timeline used in the MVP.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timeline {
     pub segments: Vec<Segment>,
 }
 
 /// A linear segment referencing one source asset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Segment {
     pub id: SegmentId,
     pub asset_id: AssetId,

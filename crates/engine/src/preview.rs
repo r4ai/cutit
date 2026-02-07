@@ -34,6 +34,7 @@ pub struct ProbedMedia {
 /// Probed video stream information used by timeline mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProbedVideoStream {
+    pub stream_index: u32,
     pub time_base: Rational,
     pub src_in: i64,
     pub src_out: i64,
@@ -44,6 +45,7 @@ pub struct ProbedVideoStream {
 /// Probed audio stream information used by timeline mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProbedAudioStream {
+    pub stream_index: u32,
     pub time_base: Rational,
     pub src_in: i64,
     pub src_out: i64,
@@ -83,6 +85,7 @@ impl MediaBackend for FfmpegMediaBackend {
                         src_in + rescale(duration_tl, TIMELINE_TIME_BASE, stream.time_base.into())
                     });
                 Ok(ProbedVideoStream {
+                    stream_index: stream.index,
                     time_base: stream.time_base.into(),
                     src_in,
                     src_out,
@@ -115,6 +118,7 @@ impl MediaBackend for FfmpegMediaBackend {
                     .ok_or_else(|| EngineError::MissingAudioMetadata(path.to_path_buf()))?;
 
                 Ok(ProbedAudioStream {
+                    stream_index: stream.index,
                     time_base: stream.time_base.into(),
                     src_in,
                     src_out,

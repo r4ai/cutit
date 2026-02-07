@@ -1,7 +1,8 @@
 use crate::error::{EngineError, Result};
+use serde::{Deserialize, Serialize};
 
 /// FFmpeg-like rational number used as a time base.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rational {
     pub num: i32,
     pub den: i32,

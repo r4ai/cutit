@@ -46,6 +46,18 @@ pub enum EngineError {
         num: i32,
         den: i32,
     },
+    ProjectIo {
+        context: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    ProjectSerialization {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    InvalidProjectFile {
+        reason: String,
+    },
     Media(media_ffmpeg::MediaFfmpegError),
 }
 
@@ -98,6 +110,19 @@ impl Display for EngineError {
                 write!(f, "audio metadata is missing: {}", path.display())
             }
             Self::InvalidRational { num, den } => write!(f, "invalid rational {num}/{den}"),
+            Self::ProjectIo {
+                context,
+                path,
+                source,
+            } => write!(f, "{context}: {} ({source})", path.display()),
+            Self::ProjectSerialization { path, source } => {
+                write!(
+                    f,
+                    "project serialization failed at {} ({source})",
+                    path.display()
+                )
+            }
+            Self::InvalidProjectFile { reason } => write!(f, "invalid project file: {reason}"),
             Self::Media(err) => write!(f, "media backend error: {err}"),
         }
     }
@@ -106,6 +131,8 @@ impl Display for EngineError {
 impl std::error::Error for EngineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::ProjectIo { source, .. } => Some(source),
+            Self::ProjectSerialization { source, .. } => Some(source),
             Self::Media(err) => Some(err),
             _ => None,
         }

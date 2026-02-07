@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::{cmp, sync::mpsc::TrySendError};
 
-use engine::{Command, EngineErrorKind, Event, ProjectSnapshot};
+use engine::{Command, EngineErrorKind, Event, ExportSettings, ProjectSnapshot};
 use iced::widget::canvas;
 use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Length, Subscription, Task};
@@ -14,6 +14,8 @@ use crate::widgets::{preview, timeline};
 pub enum Message {
     ImportPathChanged(String),
     ImportPressed,
+    ExportPathChanged(String),
+    ExportPressed,
     SplitPressed,
     TimelineScrubbed(i64),
     TimelineSplitRequested(i64),
@@ -26,6 +28,7 @@ pub struct AppState {
     project: Option<ProjectSnapshot>,
     preview_image: Option<preview::PreviewImage>,
     import_path: String,
+    export_path: String,
     playhead_tl: i64,
     pending_playhead_tl: Option<i64>,
     playhead_request_in_flight: bool,
@@ -44,6 +47,7 @@ impl AppState {
                 project: None,
                 preview_image: None,
                 import_path: String::new(),
+                export_path: String::new(),
                 playhead_tl: 0,
                 pending_playhead_tl: None,
                 playhead_request_in_flight: false,
@@ -72,6 +76,20 @@ impl AppState {
                     self.pending_split_tl = None;
                     self.last_split_tl = None;
                     self.status = format!("importing {}", path);
+                }
+            }
+            Message::ExportPathChanged(path) => {
+                self.export_path = path;
+            }
+            Message::ExportPressed => {
+                let path = self.export_path.trim().to_owned();
+                if path.is_empty() {
+                    self.status = String::from("export path is empty");
+                } else if self.send_command(Command::Export {
+                    path: PathBuf::from(&path),
+                    settings: ExportSettings::default(),
+                }) {
+                    self.status = format!("export requested: {}", path);
                 }
             }
             Message::SplitPressed => {
@@ -278,6 +296,11 @@ impl AppState {
             button("Split").on_press(Message::SplitPressed),
         ]
         .spacing(12);
+        let export_row = row![
+            text_input("export path", &self.export_path).on_input(Message::ExportPathChanged),
+            button("Export").on_press(Message::ExportPressed),
+        ]
+        .spacing(12);
 
         let preview_widget = container(preview::view(self.preview_image.as_ref()))
             .width(Length::Fill)
@@ -294,6 +317,7 @@ impl AppState {
 
         let controls = column![
             import_row,
+            export_row,
             preview_widget,
             timeline_widget,
             text(format!("Playhead: {}", self.playhead_tl)),
@@ -324,6 +348,7 @@ impl AppState {
             project: None,
             preview_image: None,
             import_path: String::new(),
+            export_path: String::new(),
             playhead_tl: 0,
             pending_playhead_tl: None,
             playhead_request_in_flight: false,
@@ -363,6 +388,36 @@ mod tests {
                 path: PathBuf::from("demo.mp4")
             }
         );
+    }
+
+    #[test]
+    fn export_button_dispatches_export_command() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+
+        let _ = app.update(Message::ExportPathChanged("out.mp4".to_owned()));
+        let _ = app.update(Message::ExportPressed);
+
+        let command = command_rx.recv().expect("export command");
+        assert_eq!(
+            command,
+            Command::Export {
+                path: PathBuf::from("out.mp4"),
+                settings: engine::ExportSettings::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn export_button_rejects_empty_path() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+
+        let _ = app.update(Message::ExportPathChanged("   ".to_owned()));
+        let _ = app.update(Message::ExportPressed);
+
+        assert_eq!(app.status, "export path is empty");
+        assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]
