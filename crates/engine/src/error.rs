@@ -118,7 +118,7 @@ impl Display for EngineError {
             Self::ProjectSerialization { path, source } => {
                 write!(
                     f,
-                    "project serialization failed at {} ({source})",
+                    "project serialization/deserialization failed at {} ({source})",
                     path.display()
                 )
             }

@@ -19,7 +19,7 @@ pub struct Project {
     pub settings: ProjectSettings,
 }
 
-/// Project-wide settings placeholder for future steps.
+/// Project-wide defaults and persisted settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -384,7 +384,7 @@ fn validate_segment_ranges(asset: &MediaAsset, segment: &Segment) -> Result<()> 
 fn validate_video_segment_range(asset: &MediaAsset, segment: &Segment) -> Result<()> {
     match (asset.video, segment.src_in_video, segment.src_out_video) {
         (Some(_), Some(src_in_video), Some(src_out_video)) => {
-            if src_out_video <= src_in_video {
+            if src_out_video < src_in_video {
                 return Err(EngineError::InvalidVideoRange {
                     segment_id: segment.id,
                     src_in_video,
@@ -404,7 +404,7 @@ fn validate_video_segment_range(asset: &MediaAsset, segment: &Segment) -> Result
 fn validate_audio_segment_range(asset: &MediaAsset, segment: &Segment) -> Result<()> {
     match (asset.audio, segment.src_in_audio, segment.src_out_audio) {
         (Some(_), Some(src_in_audio), Some(src_out_audio)) => {
-            if src_out_audio <= src_in_audio {
+            if src_out_audio < src_in_audio {
                 return Err(EngineError::InvalidAudioRange {
                     segment_id: segment.id,
                     src_in_audio,
@@ -499,6 +499,24 @@ mod tests {
     #[test]
     fn normalize_playhead_returns_zero_for_empty_project_duration() {
         assert_eq!(normalize_playhead(10, 0), 0);
+    }
+
+    #[test]
+    fn project_persistence_allows_zero_length_stream_ranges() {
+        let mut project = sample_project();
+        let segment = &mut project.timeline.segments[0];
+        segment.src_out_video = segment.src_in_video;
+        segment.src_out_audio = segment.src_in_audio;
+        let path = temp_file_path("project-zero-length-ranges", "json");
+
+        project.save_to_file(&path).expect("save should succeed");
+        let loaded = Project::load_from_file(&path).expect("load should succeed");
+
+        assert_eq!(loaded.timeline.segments[0].src_in_video, Some(90_000));
+        assert_eq!(loaded.timeline.segments[0].src_out_video, Some(90_000));
+        assert_eq!(loaded.timeline.segments[0].src_in_audio, Some(48_000));
+        assert_eq!(loaded.timeline.segments[0].src_out_audio, Some(48_000));
+        fs::remove_file(path).expect("cleanup persisted file");
     }
 
     fn sample_project() -> Project {
