@@ -102,6 +102,7 @@ impl AppState {
                 self.pending_playhead_tl = None;
                 self.playhead_request_in_flight = false;
                 self.pending_split_tl = None;
+                self.last_split_tl = None;
             }
         }
 
@@ -212,6 +213,7 @@ impl AppState {
             }
             Event::Error(error) => {
                 if let Some(split_tl) = self.pending_split_tl.take() {
+                    self.last_split_tl = None;
                     self.status = format!("split skipped at {}: {}", split_tl, error.message);
                 } else {
                     self.status = format!("error: {}", error.message);
@@ -562,6 +564,74 @@ mod tests {
             "split skipped at 99: cannot split at segment boundary: 99"
         );
         assert_eq!(app.pending_split_tl, None);
+        assert_eq!(app.last_split_tl, None);
+    }
+
+    #[test]
+    fn split_failure_clears_previous_split_marker() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(30));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::SplitPressed);
+        let _ = command_rx.recv().expect("split command");
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+        assert_eq!(app.last_split_tl, Some(30));
+
+        let _ = app.update(Message::TimelineScrubbed(99));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::SplitPressed);
+        let _ = command_rx.recv().expect("split command");
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::Error(
+            engine::EngineErrorEvent {
+                message: "cannot split at segment boundary: 99".to_owned(),
+            },
+        ))));
+
+        assert_eq!(app.last_split_tl, None);
+    }
+
+    #[test]
+    fn bridge_disconnected_clears_split_feedback() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(30));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::SplitPressed);
+        let _ = command_rx.recv().expect("split command");
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+        assert_eq!(app.last_split_tl, Some(30));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Disconnected));
+
         assert_eq!(app.last_split_tl, None);
     }
 }
