@@ -38,6 +38,7 @@ struct TimelineState {
 struct TimelineProgram<'a, Message> {
     duration_tl: i64,
     playhead_tl: i64,
+    split_feedback_tl: Option<i64>,
     segments: &'a [SegmentSummary],
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
@@ -58,6 +59,26 @@ fn playhead_x_from_tick(playhead_tl: i64, duration_tl: i64, width: f32) -> f32 {
     (clamped_tick as f32 / duration_tl as f32) * width
 }
 
+fn split_boundary_ticks(segments: &[SegmentSummary], duration_tl: i64) -> Vec<i64> {
+    if duration_tl <= 0 {
+        return Vec::new();
+    }
+
+    let mut ticks = Vec::new();
+    for segment in segments {
+        let tick = segment.timeline_start;
+        if tick <= 0 || tick >= duration_tl {
+            continue;
+        }
+
+        if ticks.last().copied() != Some(tick) {
+            ticks.push(tick);
+        }
+    }
+
+    ticks
+}
+
 impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
     type State = TimelineState;
 
@@ -72,7 +93,11 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
             return (canvas::event::Status::Ignored, None);
         }
 
-        let cursor_x = cursor.position().map(|position| position.x - bounds.x);
+        let cursor_x = if cursor.is_over(bounds) {
+            cursor.position().map(|position| position.x - bounds.x)
+        } else {
+            None
+        };
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let Some(x) = cursor_x else {
@@ -92,6 +117,11 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 }
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
+                if !cursor.is_over(bounds) {
+                    state.dragging = false;
+                    return (canvas::event::Status::Ignored, None);
+                }
+
                 let Some(x) = cursor_x else {
                     return (canvas::event::Status::Ignored, None);
                 };
@@ -136,10 +166,38 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 );
                 frame.fill(&rect, Color::from_rgb8(55, 110, 188));
             }
+
+            for split_tl in split_boundary_ticks(self.segments, self.duration_tl) {
+                let split_x = playhead_x_from_tick(split_tl, self.duration_tl, bounds.width);
+                let split_line = Path::line(
+                    Point::new(split_x, 8.0),
+                    Point::new(split_x, (bounds.height - 8.0).max(8.0)),
+                );
+                frame.stroke(
+                    &split_line,
+                    Stroke::default()
+                        .with_width(1.0)
+                        .with_color(Color::from_rgb8(196, 206, 220)),
+                );
+            }
         });
 
         let mut playhead_frame = canvas::Frame::new(renderer, bounds.size());
         if self.duration_tl > 0 {
+            if let Some(split_tl) = self.split_feedback_tl {
+                let split_x = playhead_x_from_tick(split_tl, self.duration_tl, bounds.width);
+                let split_line = Path::line(
+                    Point::new(split_x, 3.0),
+                    Point::new(split_x, (bounds.height - 3.0).max(3.0)),
+                );
+                playhead_frame.stroke(
+                    &split_line,
+                    Stroke::default()
+                        .with_width(2.0)
+                        .with_color(Color::from_rgb8(122, 214, 110)),
+                );
+            }
+
             let x = playhead_x_from_tick(self.playhead_tl, self.duration_tl, bounds.width);
             let line = Path::line(Point::new(x, 0.0), Point::new(x, bounds.height));
             playhead_frame.stroke(
@@ -171,6 +229,7 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
 pub fn view<'a, Message>(
     snapshot: Option<&'a ProjectSnapshot>,
     playhead_tl: i64,
+    split_feedback_tl: Option<i64>,
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
     on_split: fn(i64) -> Message,
@@ -187,6 +246,7 @@ where
         canvas::Canvas::new(TimelineProgram {
             duration_tl,
             playhead_tl,
+            split_feedback_tl,
             segments,
             cache,
             on_scrub,
@@ -201,11 +261,26 @@ where
 
 #[cfg(test)]
 mod tests {
+    use engine::api::SegmentSummary;
+    use iced::widget::canvas;
     use iced::widget::canvas::Program;
     use iced::{Point, Rectangle, mouse};
 
     use super::{TimelineProgram, TimelineState};
-    use super::{playhead_x_from_tick, tick_from_x};
+    use super::{playhead_x_from_tick, split_boundary_ticks, tick_from_x};
+
+    fn sample_segment(id: u64, timeline_start: i64, timeline_duration: i64) -> SegmentSummary {
+        SegmentSummary {
+            id,
+            asset_id: 1,
+            timeline_start,
+            timeline_duration,
+            src_in_video: None,
+            src_out_video: None,
+            src_in_audio: None,
+            src_out_audio: None,
+        }
+    }
 
     #[test]
     fn maps_left_edge_to_zero() {
@@ -243,11 +318,37 @@ mod tests {
     }
 
     #[test]
+    fn split_boundaries_include_all_non_zero_segment_starts() {
+        let segments = vec![
+            sample_segment(1, 0, 100),
+            sample_segment(2, 100, 100),
+            sample_segment(3, 250, 150),
+        ];
+
+        assert_eq!(split_boundary_ticks(&segments, 400), vec![100, 250]);
+    }
+
+    #[test]
+    fn split_boundaries_skip_out_of_range_and_duplicate_starts() {
+        let segments = vec![
+            sample_segment(1, -10, 10),
+            sample_segment(2, 0, 100),
+            sample_segment(3, 100, 100),
+            sample_segment(4, 100, 100),
+            sample_segment(5, 400, 100),
+            sample_segment(6, 500, 100),
+        ];
+
+        assert_eq!(split_boundary_ticks(&segments, 400), vec![100]);
+    }
+
+    #[test]
     fn mouse_interaction_is_none_when_timeline_is_empty() {
         let cache = iced::widget::canvas::Cache::new();
         let program = TimelineProgram {
             duration_tl: 0,
             playhead_tl: 0,
+            split_feedback_tl: None,
             segments: &[],
             cache: &cache,
             on_scrub: |_| (),
@@ -273,6 +374,7 @@ mod tests {
         let program = TimelineProgram {
             duration_tl: 10,
             playhead_tl: 0,
+            split_feedback_tl: None,
             segments: &[],
             cache: &cache,
             on_scrub: |_| (),
@@ -290,5 +392,111 @@ mod tests {
         );
 
         assert_eq!(interaction, mouse::Interaction::Pointer);
+    }
+
+    #[test]
+    fn drag_stops_when_cursor_leaves_timeline_bounds() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |tick| tick,
+            on_split: |_| -1,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (_, pressed) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(10.0, 10.0)),
+        );
+        assert_eq!(pressed, Some(10));
+        assert!(state.dragging);
+
+        let (status, moved) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(120.0, 10.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(120.0, 10.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Ignored);
+        assert_eq!(moved, None);
+        assert!(!state.dragging);
+    }
+
+    #[test]
+    fn left_click_outside_timeline_does_not_seek() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |tick| tick,
+            on_split: |_| -1,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (status, message) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(120.0, 10.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Ignored);
+        assert_eq!(message, None);
+        assert!(!state.dragging);
+    }
+
+    #[test]
+    fn right_click_outside_timeline_does_not_split() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |_| -1,
+            on_split: |tick| tick,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (status, message) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)),
+            bounds,
+            mouse::Cursor::Available(Point::new(-10.0, 10.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Ignored);
+        assert_eq!(message, None);
     }
 }
