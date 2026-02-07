@@ -29,6 +29,8 @@ pub struct AppState {
     playhead_tl: i64,
     pending_playhead_tl: Option<i64>,
     playhead_request_in_flight: bool,
+    pending_split_tl: Option<i64>,
+    last_split_tl: Option<i64>,
     timeline_cache: canvas::Cache,
     status: String,
 }
@@ -45,6 +47,8 @@ impl AppState {
                 playhead_tl: 0,
                 pending_playhead_tl: None,
                 playhead_request_in_flight: false,
+                pending_split_tl: None,
+                last_split_tl: None,
                 timeline_cache: canvas::Cache::new(),
                 status: String::from("starting engine bridge"),
             },
@@ -65,15 +69,13 @@ impl AppState {
                 } else if self.send_command(Command::Import {
                     path: PathBuf::from(&path),
                 }) {
+                    self.pending_split_tl = None;
+                    self.last_split_tl = None;
                     self.status = format!("importing {}", path);
                 }
             }
             Message::SplitPressed => {
-                if self.send_command(Command::Split {
-                    at_tl: self.playhead_tl,
-                }) {
-                    self.status = format!("split requested at {}", self.playhead_tl);
-                }
+                self.request_split(self.playhead_tl);
             }
             Message::TimelineScrubbed(t_tl) => {
                 let clamped = self.clamp_playhead(t_tl);
@@ -83,10 +85,8 @@ impl AppState {
             Message::TimelineSplitRequested(at_tl) => {
                 let clamped = self.clamp_playhead(at_tl);
                 self.playhead_tl = clamped;
-                if self.send_command(Command::Split { at_tl: clamped }) {
-                    self.status = format!("split requested at {}", clamped);
-                    self.queue_playhead(clamped);
-                }
+                self.request_split(clamped);
+                self.queue_playhead(clamped);
             }
             Message::Bridge(BridgeEvent::Ready(sender)) => {
                 self.engine_tx = Some(sender);
@@ -101,6 +101,7 @@ impl AppState {
                 self.engine_tx = None;
                 self.pending_playhead_tl = None;
                 self.playhead_request_in_flight = false;
+                self.pending_split_tl = None;
             }
         }
 
@@ -131,6 +132,15 @@ impl AppState {
     fn queue_playhead(&mut self, t_tl: i64) {
         self.pending_playhead_tl = Some(t_tl);
         self.flush_playhead_request();
+    }
+
+    fn request_split(&mut self, at_tl: i64) {
+        let clamped = self.clamp_playhead(at_tl);
+        self.playhead_tl = clamped;
+        if self.send_command(Command::Split { at_tl: clamped }) {
+            self.pending_split_tl = Some(clamped);
+            self.status = format!("split requested at {}", clamped);
+        }
     }
 
     fn flush_playhead_request(&mut self) {
@@ -172,7 +182,13 @@ impl AppState {
                 self.timeline_cache.clear();
                 self.pending_playhead_tl = None;
                 self.playhead_request_in_flight = false;
-                self.status = String::from("project loaded");
+                self.last_split_tl = None;
+                if let Some(split_tl) = self.pending_split_tl.take() {
+                    self.last_split_tl = Some(split_tl);
+                    self.status = format!("split applied at {}", split_tl);
+                } else {
+                    self.status = String::from("project loaded");
+                }
             }
             Event::PlayheadChanged { t_tl } => {
                 self.playhead_tl = self.clamp_playhead(t_tl);
@@ -195,7 +211,11 @@ impl AppState {
                 self.status = format!("export finished: {}", path.display());
             }
             Event::Error(error) => {
-                self.status = format!("error: {}", error.message);
+                if let Some(split_tl) = self.pending_split_tl.take() {
+                    self.status = format!("split skipped at {}: {}", split_tl, error.message);
+                } else {
+                    self.status = format!("error: {}", error.message);
+                }
                 self.playhead_request_in_flight = false;
                 self.flush_playhead_request();
             }
@@ -232,6 +252,7 @@ impl AppState {
         let timeline_widget = timeline::view(
             self.project.as_ref(),
             self.playhead_tl,
+            self.last_split_tl,
             &self.timeline_cache,
             Message::TimelineScrubbed,
             Message::TimelineSplitRequested,
@@ -272,6 +293,8 @@ impl AppState {
             playhead_tl: 0,
             pending_playhead_tl: None,
             playhead_request_in_flight: false,
+            pending_split_tl: None,
+            last_split_tl: None,
             timeline_cache: canvas::Cache::new(),
             status: String::from("idle"),
         }
@@ -477,5 +500,68 @@ mod tests {
             .recv_timeout(Duration::from_millis(100))
             .expect("second set playhead command");
         assert_eq!(second, Command::SetPlayhead { t_tl: 60 });
+    }
+
+    #[test]
+    fn split_success_updates_status_and_keeps_split_feedback_tick() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(30));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::SplitPressed);
+        let _ = command_rx.recv().expect("split command");
+        assert_eq!(app.pending_split_tl, Some(30));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        assert_eq!(app.status, "split applied at 30");
+        assert_eq!(app.pending_split_tl, None);
+        assert_eq!(app.last_split_tl, Some(30));
+    }
+
+    #[test]
+    fn split_failure_updates_status_with_context_and_clears_pending_feedback() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(99));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::SplitPressed);
+        let _ = command_rx.recv().expect("split command");
+        assert_eq!(app.pending_split_tl, Some(99));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::Error(
+            engine::EngineErrorEvent {
+                message: "cannot split at segment boundary: 99".to_owned(),
+            },
+        ))));
+
+        assert_eq!(
+            app.status,
+            "split skipped at 99: cannot split at segment boundary: 99"
+        );
+        assert_eq!(app.pending_split_tl, None);
+        assert_eq!(app.last_split_tl, None);
     }
 }

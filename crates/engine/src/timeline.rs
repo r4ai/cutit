@@ -1,5 +1,6 @@
 use crate::error::{EngineError, Result};
 use crate::time::{Rational, TIMELINE_TIME_BASE, rescale};
+use tracing::{debug, warn};
 
 /// Opaque identifier for timeline segments.
 pub type SegmentId = u64;
@@ -43,6 +44,32 @@ impl Timeline {
     }
 
     /// Splits one segment into two at timeline timestamp `at_tl`.
+    ///
+    /// Returns an error when `at_tl` points to a segment boundary or does not
+    /// belong to any segment.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use engine::{Rational, Segment, Timeline};
+    ///
+    /// let mut timeline = Timeline {
+    ///     segments: vec![Segment {
+    ///         id: 1,
+    ///         asset_id: 7,
+    ///         src_in_video: Some(0),
+    ///         src_out_video: Some(90_000),
+    ///         src_in_audio: None,
+    ///         src_out_audio: None,
+    ///         timeline_start: 0,
+    ///         timeline_duration: 1_000_000,
+    ///     }],
+    /// };
+    ///
+    /// timeline
+    ///     .split_segment(500_000, 2, Some(Rational::new(1, 90_000).unwrap()), None)
+    ///     .unwrap();
+    /// assert_eq!(timeline.segments.len(), 2);
+    /// ```
     pub fn split_segment(
         &mut self,
         at_tl: i64,
@@ -51,12 +78,14 @@ impl Timeline {
         audio_time_base: Option<Rational>,
     ) -> Result<()> {
         if self.is_boundary_split_point(at_tl) {
+            warn!(at_tl, "split rejected: boundary point");
             return Err(EngineError::SplitPointAtBoundary { at_tl });
         }
 
-        let index = self
-            .find_segment_index(at_tl)
-            .ok_or(EngineError::SegmentNotFound { at_tl })?;
+        let Some(index) = self.find_segment_index(at_tl) else {
+            warn!(at_tl, "split rejected: segment not found");
+            return Err(EngineError::SegmentNotFound { at_tl });
+        };
         let current = self.segments[index].clone();
 
         let local_tl = at_tl - current.timeline_start;
@@ -91,6 +120,21 @@ impl Timeline {
             timeline_duration: right_duration,
             ..current
         };
+
+        debug!(
+            at_tl,
+            segment_id = current.id,
+            asset_id = current.asset_id,
+            next_segment_id,
+            local_tl,
+            left_duration,
+            right_duration,
+            left_video_out = ?left_video_out,
+            right_video_in = ?right_video_in,
+            left_audio_out = ?left_audio_out,
+            right_audio_in = ?right_audio_in,
+            "split accepted"
+        );
 
         self.segments[index] = left;
         self.segments.insert(index + 1, right);

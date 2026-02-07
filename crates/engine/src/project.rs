@@ -152,10 +152,25 @@ impl Project {
     }
 
     /// Splits one segment at `at_tl`.
+    ///
+    /// The timeline remains contiguous on success. The operation fails when
+    /// `at_tl` points to a segment boundary or to a position outside the
+    /// current timeline.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut project = /* construct project */;
+    /// project.split(500_000, 2).unwrap();
+    /// ```
     pub fn split(&mut self, at_tl: i64, next_segment_id: SegmentId) -> Result<()> {
         let index = self
             .timeline
-            .find_segment_index(at_tl)
+            .segments
+            .iter()
+            .position(|segment| {
+                let end = segment.timeline_start + segment.timeline_duration;
+                segment.timeline_start <= at_tl && at_tl <= end
+            })
             .ok_or(EngineError::SegmentNotFound { at_tl })?;
         let segment = &self.timeline.segments[index];
         let asset = self.asset_by_id(segment.asset_id)?;

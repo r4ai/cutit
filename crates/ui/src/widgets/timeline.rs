@@ -38,6 +38,7 @@ struct TimelineState {
 struct TimelineProgram<'a, Message> {
     duration_tl: i64,
     playhead_tl: i64,
+    split_feedback_tl: Option<i64>,
     segments: &'a [SegmentSummary],
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
@@ -140,6 +141,20 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
 
         let mut playhead_frame = canvas::Frame::new(renderer, bounds.size());
         if self.duration_tl > 0 {
+            if let Some(split_tl) = self.split_feedback_tl {
+                let split_x = playhead_x_from_tick(split_tl, self.duration_tl, bounds.width);
+                let split_line = Path::line(
+                    Point::new(split_x, 3.0),
+                    Point::new(split_x, (bounds.height - 3.0).max(3.0)),
+                );
+                playhead_frame.stroke(
+                    &split_line,
+                    Stroke::default()
+                        .with_width(2.0)
+                        .with_color(Color::from_rgb8(122, 214, 110)),
+                );
+            }
+
             let x = playhead_x_from_tick(self.playhead_tl, self.duration_tl, bounds.width);
             let line = Path::line(Point::new(x, 0.0), Point::new(x, bounds.height));
             playhead_frame.stroke(
@@ -171,6 +186,7 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
 pub fn view<'a, Message>(
     snapshot: Option<&'a ProjectSnapshot>,
     playhead_tl: i64,
+    split_feedback_tl: Option<i64>,
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
     on_split: fn(i64) -> Message,
@@ -187,6 +203,7 @@ where
         canvas::Canvas::new(TimelineProgram {
             duration_tl,
             playhead_tl,
+            split_feedback_tl,
             segments,
             cache,
             on_scrub,
@@ -248,6 +265,7 @@ mod tests {
         let program = TimelineProgram {
             duration_tl: 0,
             playhead_tl: 0,
+            split_feedback_tl: None,
             segments: &[],
             cache: &cache,
             on_scrub: |_| (),
@@ -273,6 +291,7 @@ mod tests {
         let program = TimelineProgram {
             duration_tl: 10,
             playhead_tl: 0,
+            split_feedback_tl: None,
             segments: &[],
             cache: &cache,
             on_scrub: |_| (),

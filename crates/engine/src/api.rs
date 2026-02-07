@@ -4,6 +4,7 @@ use crate::error::{EngineError, Result};
 use crate::export::build_video_export_plan;
 use crate::preview::{FfmpegMediaBackend, MediaBackend, PreviewFrame};
 use crate::project::{Project, normalize_playhead};
+use tracing::info;
 
 /// Commands accepted by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +15,19 @@ pub enum Command {
     SetPlayhead {
         t_tl: i64,
     },
+    /// Splits the segment at `at_tl` in timeline ticks.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use std::path::PathBuf;
+    /// use engine::{Command, Engine, FfmpegMediaBackend};
+    ///
+    /// let mut engine = Engine::new(FfmpegMediaBackend);
+    /// let _ = engine.handle_command(Command::Import {
+    ///     path: PathBuf::from("demo.mp4"),
+    /// });
+    /// let _ = engine.handle_command(Command::Split { at_tl: 500_000 });
+    /// ```
     Split {
         at_tl: i64,
     },
@@ -155,9 +169,17 @@ where
     }
 
     fn split(&mut self, at_tl: i64) -> Result<Vec<Event>> {
-        let next_segment_id = self.allocate_segment_id();
         let project = self.project.as_mut().ok_or(EngineError::ProjectNotLoaded)?;
+        let next_segment_id = self.next_segment_id;
         project.split(at_tl, next_segment_id)?;
+        self.next_segment_id += 1;
+
+        info!(
+            at_tl,
+            next_segment_id,
+            segment_count = project.timeline.segments.len(),
+            "split applied"
+        );
 
         Ok(vec![Event::ProjectChanged(project.snapshot())])
     }
@@ -298,6 +320,85 @@ mod tests {
         assert_eq!(right.src_out_video, Some(198_000));
         assert_eq!(right.src_in_audio, Some(64_000));
         assert_eq!(right.src_out_audio, Some(105_600));
+    }
+
+    #[test]
+    fn split_at_timeline_boundaries_returns_error() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+
+        let start = engine.handle_command(Command::Split { at_tl: 0 });
+        assert!(matches!(
+            start,
+            Err(crate::error::EngineError::SplitPointAtBoundary { at_tl: 0 })
+        ));
+
+        let end = engine.handle_command(Command::Split { at_tl: 1_200_000 });
+        assert!(matches!(
+            end,
+            Err(crate::error::EngineError::SplitPointAtBoundary { at_tl: 1_200_000 })
+        ));
+    }
+
+    #[test]
+    fn failed_split_does_not_consume_next_segment_id() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+
+        let boundary_result = engine.handle_command(Command::Split { at_tl: 0 });
+        assert!(matches!(
+            boundary_result,
+            Err(crate::error::EngineError::SplitPointAtBoundary { at_tl: 0 })
+        ));
+
+        let events = engine
+            .handle_command(Command::Split { at_tl: 333_333 })
+            .expect("split should succeed");
+        let Event::ProjectChanged(snapshot) = &events[0] else {
+            panic!("split must emit ProjectChanged");
+        };
+
+        let ids: Vec<u64> = snapshot.segments.iter().map(|segment| segment.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn repeated_splits_keep_timeline_contiguous_and_duration_stable() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 333_333 })
+            .expect("first split should succeed");
+
+        let events = engine
+            .handle_command(Command::Split { at_tl: 900_000 })
+            .expect("second split should succeed");
+        let Event::ProjectChanged(snapshot) = &events[0] else {
+            panic!("split must emit ProjectChanged");
+        };
+
+        assert_eq!(snapshot.duration_tl, 1_200_000);
+        assert_eq!(snapshot.segments.len(), 3);
+
+        let first = &snapshot.segments[0];
+        let second = &snapshot.segments[1];
+        let third = &snapshot.segments[2];
+
+        assert_eq!(first.timeline_start + first.timeline_duration, second.timeline_start);
+        assert_eq!(second.timeline_start + second.timeline_duration, third.timeline_start);
+        assert_eq!(third.timeline_start + third.timeline_duration, snapshot.duration_tl);
     }
 
     #[test]
