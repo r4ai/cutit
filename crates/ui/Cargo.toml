@@ -1,0 +1,8 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+engine = { path = "../engine" }
+iced = { version = "0.13", default-features = true, features = ["image", "canvas", "advanced", "tokio"] }

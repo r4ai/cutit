@@ -9,7 +9,7 @@ pub mod project;
 pub mod time;
 pub mod timeline;
 
-pub use api::{Command, Engine, Event, ExportSettings, ProjectSnapshot};
+pub use api::{Command, Engine, EngineErrorEvent, Event, ExportSettings, ProjectSnapshot};
 pub use error::{EngineError, Result};
 pub use preview::{
     FfmpegMediaBackend, MediaBackend, PreviewFrame, PreviewPixelFormat, ProbedAudioStream,

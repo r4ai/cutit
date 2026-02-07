@@ -238,7 +238,7 @@ UI issues commands; engine emits events (including progress and errors).
 pub enum Command {
   Import { path: PathBuf },
 
-  SetPlayhead { t_tl: i64 },    // timeline ticks
+  SetPlayhead { t_tl: i64 },    // timeline ticks, clamped to [0, duration_tl - 1]
   Split { at_tl: i64 },
 
   Export { path: PathBuf, settings: ExportSettings },
@@ -254,7 +254,7 @@ pub enum Event {
   ExportProgress { done: u64, total: u64 },
   ExportFinished { path: PathBuf },
 
-  Error(EngineError),
+  Error(EngineErrorEvent),
 }
 ```
 
@@ -450,18 +450,18 @@ Key rules for this MVP:
 - `AppState` stores only UI state + immutable `ProjectSnapshot` + render caches (preview image handle, timeline cache)
 - `Message` is split into:
   - UI messages (button clicks, slider scrubs, timeline interactions)
-  - Engine events (wrapped `engine::Event`)
+  - Bridge messages (e.g. `BridgeEvent::Ready`, `BridgeEvent::Event(engine::Event)`, `BridgeEvent::Disconnected`)
 - `update` is synchronous and returns `Task<Message>`:
   - usually `Task::none()` when only mutating state / sending a command
   - use tasks for things like file dialogs or long-running UI-side IO
-- `subscription` keeps the engine event stream alive and feeds it into `Message::Engine(...)`
+- `subscription` keeps the engine event stream alive and feeds it into `Message::Bridge(...)` (no timer-based polling)
 
 Skeleton:
 ```rust
 pub fn main() -> iced::Result {
-  iced::application(AppState::boot, AppState::update, AppState::view)
+  iced::application("Cutit", AppState::update, AppState::view)
     .subscription(AppState::subscription)
-    .run()
+    .run_with(AppState::boot)
 }
 ```
 
@@ -471,6 +471,7 @@ The bridge must satisfy:
 - UI receives `engine::Event` as an iced `Subscription`
 - no FFmpeg types cross the boundary
 - engine thread lifetime is controlled by subscription lifetime (MVP convenience)
+- command/event channels are bounded to enforce backpressure
 
 Recommended bridge (conceptual):
 - Create an **engine command sender** stored in `AppState` after initialization.
@@ -481,12 +482,13 @@ Recommended bridge (conceptual):
 Practical pattern:
 - On app start, `AppState` has `engine_tx: Option<EngineCommandSender> = None`.
 - `subscription` starts a worker that emits:
-  - `Message::EngineReady(engine_tx)` once
-  - `Message::Engine(event)` for subsequent events
+  - `Message::Bridge(BridgeEvent::Ready(engine_tx))` once
+  - `Message::Bridge(BridgeEvent::Event(event))` for subsequent events
+  - `Message::Bridge(BridgeEvent::Disconnected)` when the bridge stops
 
 This lets `update` be purely synchronous:
 - if `engine_tx.is_some()` → send command
-- if not ready yet → ignore or queue locally (MVP: ignore)
+- if not ready yet → keep only the newest scrub request (coalescing)
 
 ### 8.4 Preview widget (RGBA-first, GPU path later)
 **MVP default**: engine delivers `PreviewFrame { format: Rgba8, bytes }`.
@@ -514,7 +516,8 @@ Use `Canvas` for:
 
 MVP interaction model:
 - timeline emits `Message::TimelineScrubbed(t_tl)`
-- UI update sends `Command::SetPlayhead { t_tl }`
+- UI update coalesces scrub updates and sends at most one in-flight `Command::SetPlayhead { t_tl }`
+- UI playhead and timeline slider both clamp to `[0, duration_tl - 1]` (when `duration_tl > 0`)
 - engine emits `PreviewFrameReady { t_tl, frame }` asynchronously
 
 ### 8.6 File dialogs + export progress UI (Tasks + events)
@@ -620,6 +623,8 @@ Work:
 - Bootstrap the application (`boot/update/view/subscription`)
 - Initialize engine thread and command/event channels
 - Wire basic UI actions: Import, SetPlayhead, Split command dispatch
+- Use a subscription-based bridge event flow (no fixed-interval polling)
+- Add bounded channels and scrub command coalescing to avoid command/event backlog
 
 ### Step 7 — GUI widgets (preview + timeline interaction)
 Where to implement:

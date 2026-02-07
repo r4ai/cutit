@@ -2,7 +2,7 @@
 members = [
   "crates/engine",
   "crates/media-ffmpeg",
-  "crates/ui-iced",
+  "crates/ui",
   "crates/cli",
 ]
 resolver = "2"
