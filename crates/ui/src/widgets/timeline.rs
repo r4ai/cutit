@@ -93,7 +93,11 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
             return (canvas::event::Status::Ignored, None);
         }
 
-        let cursor_x = cursor.position().map(|position| position.x - bounds.x);
+        let cursor_x = if cursor.is_over(bounds) {
+            cursor.position().map(|position| position.x - bounds.x)
+        } else {
+            None
+        };
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let Some(x) = cursor_x else {
@@ -113,6 +117,11 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 }
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
+                if !cursor.is_over(bounds) {
+                    state.dragging = false;
+                    return (canvas::event::Status::Ignored, None);
+                }
+
                 let Some(x) = cursor_x else {
                     return (canvas::event::Status::Ignored, None);
                 };
@@ -253,6 +262,7 @@ where
 #[cfg(test)]
 mod tests {
     use engine::api::SegmentSummary;
+    use iced::widget::canvas;
     use iced::widget::canvas::Program;
     use iced::{Point, Rectangle, mouse};
 
@@ -382,5 +392,111 @@ mod tests {
         );
 
         assert_eq!(interaction, mouse::Interaction::Pointer);
+    }
+
+    #[test]
+    fn drag_stops_when_cursor_leaves_timeline_bounds() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |tick| tick,
+            on_split: |_| -1,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (_, pressed) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(10.0, 10.0)),
+        );
+        assert_eq!(pressed, Some(10));
+        assert!(state.dragging);
+
+        let (status, moved) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(120.0, 10.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(120.0, 10.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Ignored);
+        assert_eq!(moved, None);
+        assert!(!state.dragging);
+    }
+
+    #[test]
+    fn left_click_outside_timeline_does_not_seek() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |tick| tick,
+            on_split: |_| -1,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (status, message) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(120.0, 10.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Ignored);
+        assert_eq!(message, None);
+        assert!(!state.dragging);
+    }
+
+    #[test]
+    fn right_click_outside_timeline_does_not_split() {
+        let cache = iced::widget::canvas::Cache::new();
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &[],
+            cache: &cache,
+            on_scrub: |_| -1,
+            on_split: |tick| tick,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (status, message) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)),
+            bounds,
+            mouse::Cursor::Available(Point::new(-10.0, 10.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Ignored);
+        assert_eq!(message, None);
     }
 }
