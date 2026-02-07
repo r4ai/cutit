@@ -2,7 +2,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use engine::{Command, Engine, EngineErrorEvent, Event, MediaBackend};
-use iced::futures::SinkExt;
+use iced::futures::{SinkExt, StreamExt, channel::mpsc as futures_mpsc, executor};
 use iced::{Subscription, stream};
 
 const COMMAND_CHANNEL_CAPACITY: usize = 32;
@@ -33,11 +33,24 @@ fn bridge_worker_stream() -> impl iced::futures::Stream<Item = BridgeEvent> {
         let (engine_tx, engine_rx) = spawn_ffmpeg_bridge();
         let _ = output.send(BridgeEvent::Ready(engine_tx)).await;
 
-        while let Ok(event) = engine_rx.recv() {
-            let _ = output.send(BridgeEvent::Event(event)).await;
-        }
+        let (forward_tx, mut forward_rx) =
+            futures_mpsc::channel::<BridgeEvent>(SUBSCRIPTION_CHANNEL_CAPACITY);
 
-        let _ = output.send(BridgeEvent::Disconnected).await;
+        thread::spawn(move || {
+            let mut forward_tx = forward_tx;
+            while let Ok(event) = engine_rx.recv() {
+                if executor::block_on(forward_tx.send(BridgeEvent::Event(event))).is_err() {
+                    return;
+                }
+            }
+            let _ = executor::block_on(forward_tx.send(BridgeEvent::Disconnected));
+        });
+
+        while let Some(event) = forward_rx.next().await {
+            if output.send(event).await.is_err() {
+                break;
+            }
+        }
     })
 }
 

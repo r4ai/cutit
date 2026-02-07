@@ -459,9 +459,9 @@ Key rules for this MVP:
 Skeleton:
 ```rust
 pub fn main() -> iced::Result {
-  iced::application(AppState::boot, AppState::update, AppState::view)
+  iced::application("Cutit", AppState::update, AppState::view)
     .subscription(AppState::subscription)
-    .run()
+    .run_with(AppState::boot)
 }
 ```
 
