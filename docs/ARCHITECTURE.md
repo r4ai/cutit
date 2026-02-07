@@ -637,6 +637,37 @@ Work:
 - Draw segments + playhead on timeline
 - Implement click/drag scrub and split-triggered message flow
 
+### Step 8 — Cut feature hardening (engine + UI)
+Where to implement:
+- `crates/engine/src/timeline.rs`
+- `crates/engine/src/api.rs`
+- `crates/ui/src/app.rs`
+- `crates/ui/src/widgets/timeline.rs`
+
+Work:
+- Keep `Step 2/6/7` implementations as baseline and define failing tests first for cut edge cases
+- Harden `Split { at_tl }` behavior at boundaries (start/end, segment edges, mid-segment) while preserving timeline invariants
+- Verify `ProjectChanged` snapshot consistency after repeated cuts and no-op conditions (out-of-range / invalid points)
+- Finalize UI cut UX (playhead-based trigger, selection feedback, command dispatch/result reflection)
+- Add structured logs for cut operations (segment IDs, timeline ticks, mapped source timestamps)
+- Add/refresh doc-comments and examples on cut-related public APIs
+
+### Step 9 — Export feature integration & hardening
+Where to implement:
+- `crates/engine/src/export.rs`
+- `crates/engine/src/api.rs`
+- `crates/media-ffmpeg/src/{decode.rs,encode.rs,mux.rs,resample.rs,time.rs}`
+- `crates/ui/src/app.rs`
+- `crates/cli/src/main.rs`
+
+Work:
+- Define failing tests first for export correctness (duration, monotonic timestamps, A/V sync)
+- Integrate existing export pipeline into end-to-end flow (`Export`, `CancelExport`, progress events, UI state transitions)
+- Harden cancellation, error propagation, and worker-thread boundaries under long-running exports
+- Validate timeline-driven retimestamping against segment boundaries for cut-then-export cases
+- Extend deterministic CLI regression checks for cut-then-export scenarios (video-only and video+audio paths)
+- Add structured logs for export progress/failures and refresh doc-comments/examples on export-related public APIs
+
 ---
 
 ## 14. Post-MVP extension points
