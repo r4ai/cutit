@@ -1,13 +1,45 @@
 use std::sync::mpsc;
 use std::thread;
 
-use engine::{Command, Engine, Event, MediaBackend};
+use engine::{Command, Engine, EngineErrorEvent, Event, MediaBackend};
+use iced::futures::SinkExt;
+use iced::{Subscription, stream};
+
+const COMMAND_CHANNEL_CAPACITY: usize = 32;
+const EVENT_CHANNEL_CAPACITY: usize = 8;
+const SUBSCRIPTION_CHANNEL_CAPACITY: usize = 32;
 
 /// Sender used by the UI thread to dispatch commands to the engine thread.
-pub type EngineCommandSender = mpsc::Sender<Command>;
+pub type EngineCommandSender = mpsc::SyncSender<Command>;
 
 /// Receiver used by the UI thread to read events emitted by the engine thread.
 pub type EngineEventReceiver = mpsc::Receiver<Event>;
+
+/// Messages emitted by the engine bridge subscription.
+#[derive(Debug, Clone)]
+pub enum BridgeEvent {
+    Ready(EngineCommandSender),
+    Event(Event),
+    Disconnected,
+}
+
+/// Builds a subscription that starts the engine bridge and forwards events.
+pub fn engine_subscription() -> Subscription<BridgeEvent> {
+    Subscription::run(bridge_worker_stream)
+}
+
+fn bridge_worker_stream() -> impl iced::futures::Stream<Item = BridgeEvent> {
+    stream::channel(SUBSCRIPTION_CHANNEL_CAPACITY, |mut output| async move {
+        let (engine_tx, engine_rx) = spawn_ffmpeg_bridge();
+        let _ = output.send(BridgeEvent::Ready(engine_tx)).await;
+
+        while let Ok(event) = engine_rx.recv() {
+            let _ = output.send(BridgeEvent::Event(event)).await;
+        }
+
+        let _ = output.send(BridgeEvent::Disconnected).await;
+    })
+}
 
 /// Spawns the production bridge that wires a FFmpeg-backed engine.
 pub fn spawn_ffmpeg_bridge() -> (EngineCommandSender, EngineEventReceiver) {
@@ -19,8 +51,8 @@ pub fn spawn_engine_bridge<M>(mut engine: Engine<M>) -> (EngineCommandSender, En
 where
     M: MediaBackend + Send + 'static,
 {
-    let (command_tx, command_rx) = mpsc::channel::<Command>();
-    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    let (command_tx, command_rx) = mpsc::sync_channel::<Command>(COMMAND_CHANNEL_CAPACITY);
+    let (event_tx, event_rx) = mpsc::sync_channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
     thread::spawn(move || {
         while let Ok(command) = command_rx.recv() {
@@ -34,7 +66,7 @@ where
                 }
                 Err(error) => {
                     if event_tx
-                        .send(Event::Error(engine::api::EngineErrorEvent {
+                        .send(Event::Error(EngineErrorEvent {
                             message: error.to_string(),
                         }))
                         .is_err()
