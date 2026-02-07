@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    let _app = ui_iced::app::AppState::new();
 }
