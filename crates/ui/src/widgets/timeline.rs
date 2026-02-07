@@ -166,24 +166,24 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 );
                 frame.fill(&rect, Color::from_rgb8(55, 110, 188));
             }
-        });
 
-        let mut playhead_frame = canvas::Frame::new(renderer, bounds.size());
-        if self.duration_tl > 0 {
             for split_tl in split_boundary_ticks(self.segments, self.duration_tl) {
                 let split_x = playhead_x_from_tick(split_tl, self.duration_tl, bounds.width);
                 let split_line = Path::line(
                     Point::new(split_x, 8.0),
                     Point::new(split_x, (bounds.height - 8.0).max(8.0)),
                 );
-                playhead_frame.stroke(
+                frame.stroke(
                     &split_line,
                     Stroke::default()
                         .with_width(1.0)
                         .with_color(Color::from_rgb8(196, 206, 220)),
                 );
             }
+        });
 
+        let mut playhead_frame = canvas::Frame::new(renderer, bounds.size());
+        if self.duration_tl > 0 {
             if let Some(split_tl) = self.split_feedback_tl {
                 let split_x = playhead_x_from_tick(split_tl, self.duration_tl, bounds.width);
                 let split_line = Path::line(

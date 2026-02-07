@@ -225,9 +225,14 @@ impl AppState {
                 self.status = format!("export finished: {}", path.display());
             }
             Event::Error(error) => {
-                if let Some(split_tl) = self.pending_split_tl.take() {
-                    self.last_split_tl = None;
-                    self.status = format!("split skipped at {}: {}", split_tl, error.message);
+                if let Some(split_tl) = self.pending_split_tl {
+                    if self.is_split_error_message(&error.message) {
+                        self.pending_split_tl = None;
+                        self.last_split_tl = None;
+                        self.status = format!("split skipped at {}: {}", split_tl, error.message);
+                    } else {
+                        self.status = format!("error: {}", error.message);
+                    }
                 } else {
                     self.status = format!("error: {}", error.message);
                 }
@@ -242,6 +247,11 @@ impl AppState {
             Some(pending_t_tl) => pending_t_tl != event_t_tl,
             None => false,
         }
+    }
+
+    fn is_split_error_message(&self, message: &str) -> bool {
+        message.starts_with("cannot split at segment boundary")
+            || message.starts_with("segment not found at timeline timestamp")
     }
 
     fn clamp_playhead(&self, t_tl: i64) -> i64 {
@@ -715,6 +725,43 @@ mod tests {
         ))));
 
         assert_eq!(app.last_split_tl, None);
+    }
+
+    #[test]
+    fn non_split_error_does_not_consume_pending_split_feedback() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(42));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::SplitPressed);
+        let _ = command_rx.recv().expect("split command");
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::Error(
+            engine::EngineErrorEvent {
+                message: "media backend error: decode failed".to_owned(),
+            },
+        ))));
+
+        assert_eq!(app.status, "error: media backend error: decode failed");
+        assert_eq!(app.pending_split_tl, Some(42));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+        assert_eq!(app.pending_split_tl, None);
+        assert_eq!(app.last_split_tl, Some(42));
     }
 
     #[test]
