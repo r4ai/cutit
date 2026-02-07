@@ -1,5 +1,6 @@
 mod app;
 mod bridge;
+mod widgets;
 
 use app::AppState;
 
