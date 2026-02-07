@@ -396,9 +396,18 @@ mod tests {
         let second = &snapshot.segments[1];
         let third = &snapshot.segments[2];
 
-        assert_eq!(first.timeline_start + first.timeline_duration, second.timeline_start);
-        assert_eq!(second.timeline_start + second.timeline_duration, third.timeline_start);
-        assert_eq!(third.timeline_start + third.timeline_duration, snapshot.duration_tl);
+        assert_eq!(
+            first.timeline_start + first.timeline_duration,
+            second.timeline_start
+        );
+        assert_eq!(
+            second.timeline_start + second.timeline_duration,
+            third.timeline_start
+        );
+        assert_eq!(
+            third.timeline_start + third.timeline_duration,
+            snapshot.duration_tl
+        );
     }
 
     #[test]
