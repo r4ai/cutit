@@ -192,16 +192,23 @@ impl AppState {
                 }
             }
             Event::PlayheadChanged { t_tl } => {
+                if self.is_stale_playhead_event(t_tl) {
+                    return;
+                }
                 self.playhead_tl = self.clamp_playhead(t_tl);
             }
             Event::PreviewFrameReady { t_tl, frame } => {
-                self.playhead_tl = self.clamp_playhead(t_tl);
-                self.preview_image = preview::PreviewImage::from_frame(&frame);
-                self.status = if self.preview_image.is_some() {
-                    format!("preview ready at {}", self.playhead_tl)
-                } else {
-                    String::from("preview frame dropped: unsupported format or invalid frame data")
-                };
+                if !self.is_stale_playhead_event(t_tl) {
+                    self.playhead_tl = self.clamp_playhead(t_tl);
+                    self.preview_image = preview::PreviewImage::from_frame(&frame);
+                    self.status = if self.preview_image.is_some() {
+                        format!("preview ready at {}", self.playhead_tl)
+                    } else {
+                        String::from(
+                            "preview frame dropped: unsupported format or invalid frame data",
+                        )
+                    };
+                }
                 self.playhead_request_in_flight = false;
                 self.flush_playhead_request();
             }
@@ -221,6 +228,13 @@ impl AppState {
                 self.playhead_request_in_flight = false;
                 self.flush_playhead_request();
             }
+        }
+    }
+
+    fn is_stale_playhead_event(&self, event_t_tl: i64) -> bool {
+        match self.pending_playhead_tl {
+            Some(pending_t_tl) => pending_t_tl != event_t_tl,
+            None => false,
         }
     }
 
@@ -391,6 +405,13 @@ mod tests {
     fn timeline_scrub_coalesces_pending_playhead_updates() {
         let (command_tx, command_rx) = mpsc::sync_channel(8);
         let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
 
         let _ = app.update(Message::TimelineScrubbed(10));
         let _ = app.update(Message::TimelineScrubbed(20));
@@ -411,9 +432,33 @@ mod tests {
                 },
             },
         )));
+        assert_eq!(app.playhead_tl, 30);
 
         let second = command_rx.recv().expect("second set playhead command");
         assert_eq!(second, Command::SetPlayhead { t_tl: 30 });
+    }
+
+    #[test]
+    fn stale_playhead_changed_event_does_not_override_latest_scrubbed_playhead() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(10));
+        let _ = command_rx.recv().expect("first set playhead command");
+        let _ = app.update(Message::TimelineScrubbed(80));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PlayheadChanged { t_tl: 10 },
+        )));
+
+        assert_eq!(app.playhead_tl, 80);
     }
 
     #[test]
