@@ -15,7 +15,7 @@ pub enum Message {
     ImportPathChanged(String),
     ImportPressed,
     SplitPressed,
-    TimelineScrubbed(f64),
+    TimelineScrubbed(i64),
     TimelineSplitRequested(i64),
     Bridge(BridgeEvent),
 }
@@ -76,7 +76,7 @@ impl AppState {
                 }
             }
             Message::TimelineScrubbed(t_tl) => {
-                let clamped = self.clamp_playhead(t_tl.round() as i64);
+                let clamped = self.clamp_playhead(t_tl);
                 self.playhead_tl = clamped;
                 self.queue_playhead(clamped);
             }
@@ -85,6 +85,7 @@ impl AppState {
                 self.playhead_tl = clamped;
                 if self.send_command(Command::Split { at_tl: clamped }) {
                     self.status = format!("split requested at {}", clamped);
+                    self.queue_playhead(clamped);
                 }
             }
             Message::Bridge(BridgeEvent::Ready(sender)) => {
@@ -213,10 +214,6 @@ impl AppState {
         }
     }
 
-    fn timeline_scrub_message(t_tl: i64) -> Message {
-        Message::TimelineScrubbed(t_tl as f64)
-    }
-
     /// Renders the UI tree.
     pub fn view(&self) -> Element<'_, Message> {
         let import_row = row![
@@ -234,7 +231,7 @@ impl AppState {
             self.project.as_ref(),
             self.playhead_tl,
             &self.timeline_cache,
-            Self::timeline_scrub_message,
+            Message::TimelineScrubbed,
             Message::TimelineSplitRequested,
         );
 
@@ -313,7 +310,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::sync_channel(8);
         let mut app = AppState::from_sender_for_test(command_tx);
 
-        let _ = app.update(Message::TimelineScrubbed(42.0));
+        let _ = app.update(Message::TimelineScrubbed(42));
 
         let command = command_rx.recv().expect("set playhead command");
         assert_eq!(command, Command::SetPlayhead { t_tl: 42 });
@@ -331,7 +328,7 @@ mod tests {
             },
         ))));
 
-        let _ = app.update(Message::TimelineScrubbed(100.0));
+        let _ = app.update(Message::TimelineScrubbed(100));
 
         let command = command_rx.recv().expect("set playhead command");
         assert_eq!(command, Command::SetPlayhead { t_tl: 99 });
@@ -341,7 +338,7 @@ mod tests {
     fn split_button_dispatches_split_at_current_playhead() {
         let (command_tx, command_rx) = mpsc::sync_channel(8);
         let mut app = AppState::from_sender_for_test(command_tx);
-        let _ = app.update(Message::TimelineScrubbed(250_000.0));
+        let _ = app.update(Message::TimelineScrubbed(250_000));
         let _ = command_rx.recv().expect("set playhead command");
 
         let _ = app.update(Message::SplitPressed);
@@ -367,9 +364,9 @@ mod tests {
         let (command_tx, command_rx) = mpsc::sync_channel(8);
         let mut app = AppState::from_sender_for_test(command_tx);
 
-        let _ = app.update(Message::TimelineScrubbed(10.0));
-        let _ = app.update(Message::TimelineScrubbed(20.0));
-        let _ = app.update(Message::TimelineScrubbed(30.0));
+        let _ = app.update(Message::TimelineScrubbed(10));
+        let _ = app.update(Message::TimelineScrubbed(20));
+        let _ = app.update(Message::TimelineScrubbed(30));
 
         let first = command_rx.recv().expect("first set playhead command");
         assert_eq!(first, Command::SetPlayhead { t_tl: 10 });
@@ -425,7 +422,10 @@ mod tests {
 
         let _ = app.update(Message::TimelineSplitRequested(100));
 
-        let command = command_rx.recv().expect("split command");
-        assert_eq!(command, Command::Split { at_tl: 99 });
+        let split = command_rx.recv().expect("split command");
+        assert_eq!(split, Command::Split { at_tl: 99 });
+
+        let set_playhead = command_rx.recv().expect("set playhead command");
+        assert_eq!(set_playhead, Command::SetPlayhead { t_tl: 99 });
     }
 }

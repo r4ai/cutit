@@ -3,6 +3,18 @@ use iced::widget::{container, image, text};
 use iced::{ContentFit, Element, Length};
 
 /// UI-ready preview image converted from an engine frame.
+///
+/// # Example
+///
+/// ```ignore
+/// let frame = engine::PreviewFrame {
+///     width: 2,
+///     height: 1,
+///     format: engine::PreviewPixelFormat::Rgba8,
+///     bytes: std::sync::Arc::from(vec![0_u8; 8]),
+/// };
+/// let image = PreviewImage::from_frame(&frame).expect("rgba frame");
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewImage {
     pub handle: image::Handle,
@@ -12,6 +24,21 @@ pub struct PreviewImage {
 
 impl PreviewImage {
     /// Converts an RGBA frame into an iced image handle.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let frame = engine::PreviewFrame {
+    ///     width: 1,
+    ///     height: 1,
+    ///     format: engine::PreviewPixelFormat::Rgba8,
+    ///     bytes: std::sync::Arc::from(vec![0_u8, 0, 0, 255]),
+    /// };
+    ///
+    /// let image = PreviewImage::from_frame(&frame).expect("valid rgba frame");
+    /// assert_eq!(image.width, 1);
+    /// assert_eq!(image.height, 1);
+    /// ```
     pub fn from_frame(frame: &PreviewFrame) -> Option<Self> {
         if frame.format != PreviewPixelFormat::Rgba8 {
             return None;

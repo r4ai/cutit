@@ -5,6 +5,18 @@ use iced::widget::container;
 use iced::{Color, Element, Length, Point, Rectangle, Size, Theme, mouse};
 
 /// Converts an x coordinate in timeline widget space to a timeline tick.
+///
+/// The mapping is proportional across the width of the widget, with the left
+/// edge corresponding to tick `0` and the right edge corresponding to the
+/// last tick (`duration_tl - 1`). Positions outside the widget are clamped.
+///
+/// # Example
+///
+/// ```ignore
+/// assert_eq!(tick_from_x(0.0, 200.0, 1_000), 0);
+/// assert_eq!(tick_from_x(200.0, 200.0, 1_000), 999);
+/// assert_eq!(tick_from_x(250.0, 200.0, 1_000), 999);
+/// ```
 pub fn tick_from_x(x: f32, width: f32, duration_tl: i64) -> i64 {
     if duration_tl <= 0 || width <= 0.0 {
         return 0;
@@ -26,10 +38,18 @@ struct TimelineState {
 struct TimelineProgram<'a, Message> {
     duration_tl: i64,
     playhead_tl: i64,
-    segments: Vec<SegmentSummary>,
+    segments: &'a [SegmentSummary],
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
     on_split: fn(i64) -> Message,
+}
+
+fn playhead_x_from_tick(playhead_tl: i64, duration_tl: i64, width: f32) -> f32 {
+    if duration_tl <= 0 {
+        return 0.0;
+    }
+
+    (playhead_tl.clamp(0, duration_tl - 1) as f32 / duration_tl as f32) * width
 }
 
 impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
@@ -99,7 +119,7 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 return;
             }
 
-            for segment in &self.segments {
+            for segment in self.segments {
                 let x =
                     (segment.timeline_start.max(0) as f32 / self.duration_tl as f32) * bounds.width;
                 let width = (segment.timeline_duration.max(1) as f32 / self.duration_tl as f32)
@@ -114,8 +134,7 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
 
         let mut playhead_frame = canvas::Frame::new(renderer, bounds.size());
         if self.duration_tl > 0 {
-            let denom = (self.duration_tl - 1).max(1) as f32;
-            let x = (self.playhead_tl.clamp(0, self.duration_tl - 1) as f32 / denom) * bounds.width;
+            let x = playhead_x_from_tick(self.playhead_tl, self.duration_tl, bounds.width);
             let line = Path::line(Point::new(x, 0.0), Point::new(x, bounds.height));
             playhead_frame.stroke(
                 &line,
@@ -144,18 +163,19 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
 
 /// Renders an interactive timeline canvas.
 pub fn view<'a, Message>(
-    snapshot: Option<&ProjectSnapshot>,
+    snapshot: Option<&'a ProjectSnapshot>,
     playhead_tl: i64,
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
     on_split: fn(i64) -> Message,
 ) -> Element<'a, Message>
 where
-    Message: 'a + Clone,
+    Message: 'a,
 {
-    let (segments, duration_tl) = snapshot
-        .map(|project| (project.segments.clone(), project.duration_tl))
-        .unwrap_or_default();
+    let (segments, duration_tl): (&'a [SegmentSummary], i64) = match snapshot {
+        Some(project) => (project.segments.as_slice(), project.duration_tl),
+        None => (&[], 0),
+    };
 
     container(
         canvas::Canvas::new(TimelineProgram {
@@ -175,7 +195,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::tick_from_x;
+    use super::{playhead_x_from_tick, tick_from_x};
 
     #[test]
     fn maps_left_edge_to_zero() {
@@ -200,5 +220,10 @@ mod tests {
     #[test]
     fn handles_empty_timeline_as_zero() {
         assert_eq!(tick_from_x(100.0, 200.0, 0), 0);
+    }
+
+    #[test]
+    fn playhead_x_uses_same_duration_scale_as_tick_mapping() {
+        assert_eq!(playhead_x_from_tick(1, 2, 200.0), 100.0);
     }
 }
