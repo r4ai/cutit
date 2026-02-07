@@ -1,7 +1,8 @@
 use crate::error::{EngineError, Result};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// FFmpeg-like rational number used as a time base.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Rational {
     pub num: i32,
     pub den: i32,
@@ -28,6 +29,22 @@ impl Rational {
             return Err(EngineError::InvalidRational { num, den });
         }
         Ok(Self { num, den })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RationalSerdeRepr {
+    num: i32,
+    den: i32,
+}
+
+impl<'de> Deserialize<'de> for Rational {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let repr = RationalSerdeRepr::deserialize(deserializer)?;
+        Rational::new(repr.num, repr.den).map_err(serde::de::Error::custom)
     }
 }
 
@@ -88,5 +105,11 @@ mod tests {
     #[test]
     fn rational_new_rejects_negative_numerator() {
         assert!(Rational::new(-1, 90_000).is_err());
+    }
+
+    #[test]
+    fn rational_deserialize_rejects_non_positive_denominator() {
+        let deserialized = serde_json::from_str::<Rational>(r#"{"num":1,"den":0}"#);
+        assert!(deserialized.is_err());
     }
 }

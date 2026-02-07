@@ -674,6 +674,7 @@ mod tests {
             path: PathBuf::from("demo.mp4"),
             duration_tl,
             video: Some(ProbedVideoStream {
+                stream_index: 0,
                 time_base: video_tb,
                 src_in: video_src_in,
                 src_out: video_src_out,
@@ -681,6 +682,7 @@ mod tests {
                 height: 90,
             }),
             audio: Some(ProbedAudioStream {
+                stream_index: 1,
                 time_base: audio_tb,
                 src_in: audio_src_in,
                 src_out: audio_src_out,
