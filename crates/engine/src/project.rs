@@ -159,10 +159,7 @@ impl Project {
 
         if file.schema_version != PROJECT_FILE_SCHEMA_VERSION {
             return Err(EngineError::InvalidProjectFile {
-                reason: format!(
-                    "unsupported project schema version {}",
-                    file.schema_version
-                ),
+                reason: format!("unsupported project schema version {}", file.schema_version),
             });
         }
 
@@ -292,7 +289,10 @@ impl Project {
             }
             if asset.video.is_none() && asset.video_stream_index.is_some() {
                 return Err(EngineError::InvalidProjectFile {
-                    reason: format!("asset {} has video stream index without video stream", asset.id),
+                    reason: format!(
+                        "asset {} has video stream index without video stream",
+                        asset.id
+                    ),
                 });
             }
 
@@ -303,7 +303,10 @@ impl Project {
             }
             if asset.audio.is_none() && asset.audio_stream_index.is_some() {
                 return Err(EngineError::InvalidProjectFile {
-                    reason: format!("asset {} has audio stream index without audio stream", asset.id),
+                    reason: format!(
+                        "asset {} has audio stream index without audio stream",
+                        asset.id
+                    ),
                 });
             }
         }
