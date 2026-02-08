@@ -216,7 +216,7 @@ pub struct Segment {
 
 Invariant (MVP):
 - `segments` are contiguous (no gaps) unless explicitly allowed.
-- Cuts are exactly segment boundaries.
+- Cuts remove the segment starting at `at_tl`, or the segment containing `at_tl` when not on a boundary.
 - `timeline_duration` is authoritative; it determines export length.
 
 ### 4.4 Editing operations (MVP)

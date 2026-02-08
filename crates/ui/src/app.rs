@@ -333,20 +333,18 @@ impl AppState {
                 self.status = format!("export finished: {}", path.display());
             }
             Event::Error(error) => {
-                if let Some(split_tl) = self.pending_split_tl {
+                if let Some(split_tl) = self.pending_split_tl.take() {
+                    self.last_split_tl = None;
                     if self.is_split_error(&error.kind) {
-                        self.pending_split_tl = None;
-                        self.last_split_tl = None;
                         self.status = format!("split skipped at {}: {}", split_tl, error.message);
                     } else {
-                        self.status = format!("error: {}", error.message);
+                        self.status = format!("split failed at {}: {}", split_tl, error.message);
                     }
-                } else if let Some(cut_tl) = self.pending_cut_tl {
+                } else if let Some(cut_tl) = self.pending_cut_tl.take() {
                     if self.is_cut_error(&error.kind) {
-                        self.pending_cut_tl = None;
                         self.status = format!("cut skipped at {}: {}", cut_tl, error.message);
                     } else {
-                        self.status = format!("error: {}", error.message);
+                        self.status = format!("cut failed at {}: {}", cut_tl, error.message);
                     }
                 } else {
                     self.status = format!("error: {}", error.message);
@@ -413,20 +411,24 @@ impl AppState {
             self.playhead_tl,
             self.last_split_tl,
             &self.timeline_cache,
-            Message::TimelineScrubbed,
-            Message::TimelineSplitRequested,
-            Message::TimelineCutRequested,
-            |segment_id, new_start_tl| Message::TimelineSegmentMoveRequested {
-                segment_id,
-                new_start_tl,
-            },
-            |segment_id, new_start_tl| Message::TimelineSegmentTrimStartRequested {
-                segment_id,
-                new_start_tl,
-            },
-            |segment_id, new_end_tl| Message::TimelineSegmentTrimEndRequested {
-                segment_id,
-                new_end_tl,
+            timeline::TimelineActions {
+                on_scrub: Message::TimelineScrubbed,
+                on_split: Message::TimelineSplitRequested,
+                on_cut: Message::TimelineCutRequested,
+                on_move: |segment_id, new_start_tl| Message::TimelineSegmentMoveRequested {
+                    segment_id,
+                    new_start_tl,
+                },
+                on_trim_start: |segment_id, new_start_tl| {
+                    Message::TimelineSegmentTrimStartRequested {
+                        segment_id,
+                        new_start_tl,
+                    }
+                },
+                on_trim_end: |segment_id, new_end_tl| Message::TimelineSegmentTrimEndRequested {
+                    segment_id,
+                    new_end_tl,
+                },
             },
         );
 
@@ -997,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn non_split_error_does_not_consume_pending_split_feedback() {
+    fn non_split_error_clears_pending_split_feedback() {
         let (command_tx, command_rx) = mpsc::sync_channel(8);
         let mut app = AppState::from_sender_for_test(command_tx);
         let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
@@ -1020,8 +1022,9 @@ mod tests {
             },
         ))));
 
-        assert_eq!(app.status, "error: media backend error: decode failed");
-        assert_eq!(app.pending_split_tl, Some(42));
+        assert_eq!(app.status, "split failed at 42: media backend error: decode failed");
+        assert_eq!(app.pending_split_tl, None);
+        assert_eq!(app.last_split_tl, None);
 
         let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
             ProjectSnapshot {
@@ -1031,11 +1034,11 @@ mod tests {
             },
         ))));
         assert_eq!(app.pending_split_tl, None);
-        assert_eq!(app.last_split_tl, Some(42));
+        assert_eq!(app.last_split_tl, None);
     }
 
     #[test]
-    fn split_like_error_message_is_ignored_when_error_kind_is_other() {
+    fn split_like_error_message_still_clears_pending_when_kind_is_other() {
         let (command_tx, command_rx) = mpsc::sync_channel(8);
         let mut app = AppState::from_sender_for_test(command_tx);
         let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
@@ -1058,8 +1061,41 @@ mod tests {
             },
         ))));
 
-        assert_eq!(app.status, "error: cannot split at segment boundary: 50");
-        assert_eq!(app.pending_split_tl, Some(50));
+        assert_eq!(
+            app.status,
+            "split failed at 50: cannot split at segment boundary: 50"
+        );
+        assert_eq!(app.pending_split_tl, None);
+        assert_eq!(app.last_split_tl, None);
+    }
+
+    #[test]
+    fn non_cut_error_clears_pending_cut_feedback() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(40));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::CutPressed);
+        let _ = command_rx.recv().expect("cut command");
+        assert_eq!(app.pending_cut_tl, Some(40));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::Error(
+            engine::EngineErrorEvent {
+                kind: engine::EngineErrorKind::Other,
+                message: "mux failed".to_owned(),
+            },
+        ))));
+
+        assert_eq!(app.status, "cut failed at 40: mux failed");
+        assert_eq!(app.pending_cut_tl, None);
     }
 
     #[test]

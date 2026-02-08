@@ -52,6 +52,7 @@ enum DragMode {
 
 const DRAG_START_THRESHOLD_PX: f32 = 4.0;
 const SEGMENT_VERTICAL_PADDING_PX: f32 = 12.0;
+const EDGE_HIT_THRESHOLD_PX: f32 = 6.0;
 
 #[derive(Debug)]
 struct TimelineProgram<'a, Message> {
@@ -66,6 +67,17 @@ struct TimelineProgram<'a, Message> {
     on_move: fn(u64, i64) -> Message,
     on_trim_start: fn(u64, i64) -> Message,
     on_trim_end: fn(u64, i64) -> Message,
+}
+
+/// Message callbacks emitted from timeline interactions.
+#[derive(Debug, Clone, Copy)]
+pub struct TimelineActions<Message> {
+    pub on_scrub: fn(i64) -> Message,
+    pub on_split: fn(i64) -> Message,
+    pub on_cut: fn(i64) -> Message,
+    pub on_move: fn(u64, i64) -> Message,
+    pub on_trim_start: fn(u64, i64) -> Message,
+    pub on_trim_end: fn(u64, i64) -> Message,
 }
 
 fn playhead_x_from_tick(playhead_tl: i64, duration_tl: i64, width: f32) -> f32 {
@@ -153,7 +165,6 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 };
                 state.drag_start_x = Some(x);
                 let tick = tick_from_x(x, bounds.width, self.duration_tl);
-                let edge_threshold_px = 6.0;
                 let is_over_segment_layer = is_over_segment_layer(cursor_y, bounds.height);
 
                 let segment = if is_over_segment_layer {
@@ -171,13 +182,13 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                         bounds.width,
                     );
 
-                    if (x - start_x).abs() <= edge_threshold_px {
+                    if (x - start_x).abs() <= EDGE_HIT_THRESHOLD_PX {
                         state.drag_mode = Some(DragMode::TrimStart {
                             segment_id: segment.id,
                         });
                         return (canvas::event::Status::Captured, None);
                     }
-                    if (x - end_x).abs() <= edge_threshold_px {
+                    if (x - end_x).abs() <= EDGE_HIT_THRESHOLD_PX {
                         state.drag_mode = Some(DragMode::TrimEnd {
                             segment_id: segment.id,
                         });
@@ -374,12 +385,7 @@ pub fn view<'a, Message>(
     playhead_tl: i64,
     split_feedback_tl: Option<i64>,
     cache: &'a canvas::Cache,
-    on_scrub: fn(i64) -> Message,
-    on_split: fn(i64) -> Message,
-    on_cut: fn(i64) -> Message,
-    on_move: fn(u64, i64) -> Message,
-    on_trim_start: fn(u64, i64) -> Message,
-    on_trim_end: fn(u64, i64) -> Message,
+    actions: TimelineActions<Message>,
 ) -> Element<'a, Message>
 where
     Message: 'a,
@@ -396,12 +402,12 @@ where
             split_feedback_tl,
             segments,
             cache,
-            on_scrub,
-            on_split,
-            on_cut,
-            on_move,
-            on_trim_start,
-            on_trim_end,
+            on_scrub: actions.on_scrub,
+            on_split: actions.on_split,
+            on_cut: actions.on_cut,
+            on_move: actions.on_move,
+            on_trim_start: actions.on_trim_start,
+            on_trim_end: actions.on_trim_end,
         })
         .width(Length::Fill)
         .height(Length::Fixed(56.0)),

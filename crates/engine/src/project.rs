@@ -448,15 +448,15 @@ impl Project {
                 .ok_or_else(|| EngineError::InvalidProjectFile {
                     reason: format!("segment {} timeline range overflowed i64", segment.id),
                 })?;
-            if let Some(previous_end) = previous_end {
-                if segment.timeline_start < previous_end {
-                    return Err(EngineError::InvalidProjectFile {
-                        reason: format!(
-                            "segment {} overlaps previous segment at {}",
-                            segment.id, segment.timeline_start
-                        ),
-                    });
-                }
+            if let Some(previous_end) = previous_end
+                && segment.timeline_start < previous_end
+            {
+                return Err(EngineError::InvalidProjectFile {
+                    reason: format!(
+                        "segment {} overlaps previous segment at {}",
+                        segment.id, segment.timeline_start
+                    ),
+                });
             }
             previous_end = Some(segment_end);
         }
