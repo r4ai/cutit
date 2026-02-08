@@ -372,10 +372,9 @@ Goal: for a requested playhead time `t_tl` (timeline ticks), produce a preview f
 - Keep a RAM LRU cache for decoded frames, keyed by `(source_path, coarse_bucket(source_tl))`.
 - Bucket width is derived from source metadata (prefer video frame rate; fallback to stream time base tick). A default value is used only when metadata is missing.
 - On a cache miss, decode and insert into cache (no synchronous neighbor prefetch on miss).
-- Neighbor prefetch is direction-aware:
-  - if scrubbing forward: prefetch multiple `+N` buckets
-  - if scrubbing backward: prefetch multiple `-N` buckets
-  - if direction unknown (idle same-position request): prefetch a wider window in both directions
+- On cache hit, neighbor prefetch runs only for idle same-position requests (`direction == unknown`), not for directional scrubs.
+- Each prefetch request decodes at most one neighboring bucket to keep command latency bounded.
+- UI issues repeated idle warm requests while the playhead is stationary, so cache coverage expands progressively around the seek point.
 - Invalidate preview cache on timeline-mutating operations (`Import`, `Split`, `Cut`, `MoveSegment`, `TrimSegmentStart`, `TrimSegmentEnd`) to avoid stale source mappings.
 
 ### 7.3 Export: decode → retimestamp → encode → mux
@@ -511,7 +510,8 @@ This lets `update` be purely synchronous:
 - if `engine_tx.is_some()` → send command
 - if not ready yet → keep only the newest scrub request (coalescing)
 - guard against delayed engine events by comparing event `t_tl` with the latest requested playhead tick
-- when preview is ready and the playhead is idle, queue one extra same-position `SetPlayhead` to trigger background neighborhood warm-up
+- when preview is ready and the playhead is idle, queue same-position `SetPlayhead` repeatedly (bounded rounds) to warm nearby cache in the background
+- idle warm requests do not update the "latest requested playhead" marker, so stale-event filtering keeps prioritizing explicit user seeks
 
 ### 8.4 Preview widget (RGBA-first, GPU path later)
 **MVP default**: engine delivers `PreviewFrame { format: Rgba8, bytes }`.
@@ -545,6 +545,7 @@ MVP interaction model:
 - UI playhead and timeline slider both clamp to `[0, duration_tl - 1]` (when `duration_tl > 0`)
 - engine emits `PreviewFrameReady { t_tl, frame }` asynchronously
 - UI merges loaded ranges by preview bucket and renders them as a top progress strip on timeline
+- while idle warm runs, UI also expands loaded-range hints outward from the playhead so progress is visible on the timeline
 
 ### 8.6 File dialogs + export progress UI (Tasks + events)
 File dialogs should live in UI (engine remains pure):

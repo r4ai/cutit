@@ -10,8 +10,9 @@ use tracing::{debug, info};
 
 const PREVIEW_CACHE_CAPACITY: usize = 96;
 pub const DEFAULT_PREVIEW_CACHE_BUCKET_TL: i64 = 33_333;
-const PREFETCH_RADIUS_DIRECTIONAL: i64 = 6;
-const PREFETCH_RADIUS_IDLE: i64 = 12;
+const PREFETCH_RADIUS_DIRECTIONAL: i64 = 18;
+const PREFETCH_RADIUS_IDLE: i64 = 120;
+const PREFETCH_MAX_DECODES_PER_REQUEST: usize = 1;
 
 /// Commands accepted by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,7 +331,7 @@ where
                 t_tl: clamped,
                 frame,
             });
-            if cache_hit {
+            if cache_hit && direction == ScrubDirection::Unknown {
                 self.prefetch_neighbors(&request, direction);
             }
             self.last_preview = Some(LastPreviewTarget {
@@ -471,7 +472,11 @@ where
     }
 
     fn prefetch_neighbors(&mut self, request: &PreviewRequest, direction: ScrubDirection) {
+        let mut decoded = 0usize;
         for offset in prefetch_offsets(direction) {
+            if decoded >= PREFETCH_MAX_DECODES_PER_REQUEST {
+                break;
+            }
             let Some(delta) = self.preview_cache.bucket_size_tl().checked_mul(offset) else {
                 continue;
             };
@@ -486,7 +491,10 @@ where
                 .media
                 .decode_preview_frame(&request.path, timeline_ticks_to_seconds(source_tl))
             {
-                Ok(frame) => self.preview_cache.insert(&request.path, source_tl, frame),
+                Ok(frame) => {
+                    self.preview_cache.insert(&request.path, source_tl, frame);
+                    decoded += 1;
+                }
                 Err(error) => {
                     debug!(
                         source_tl,
@@ -662,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn set_playhead_on_cache_hit_prefetches_directional_neighbor() {
+    fn set_playhead_on_cache_hit_does_not_prefetch_directional_neighbors() {
         let backend = MockBackend::new(sample_probed_media(), sample_frame());
         let calls = backend.decode_calls();
         let mut engine = Engine::new(backend);
@@ -683,10 +691,33 @@ mod tests {
             .expect("set playhead should succeed");
 
         let calls = calls.lock().expect("lock decode calls");
-        assert!(calls.len() >= 8);
+        assert_eq!(calls.len(), 2);
         assert_eq!(count_close_calls(&calls, 1.5), 1);
         assert_eq!(count_close_calls(&calls, 1.533_333), 1);
-        assert!(calls.iter().any(|seconds| *seconds < 1.5));
+    }
+
+    #[test]
+    fn set_playhead_on_cache_hit_prefetches_when_idle_direction_is_unknown() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let calls = backend.decode_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("second set playhead should succeed");
+
+        let calls = calls.lock().expect("lock decode calls");
+        assert_eq!(count_close_calls(&calls, 1.5), 1);
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().any(|seconds| (*seconds - 1.5).abs() > 1e-6));
     }
 
     #[test]

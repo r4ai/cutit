@@ -9,6 +9,8 @@ use iced::{Element, Length, Subscription, Task};
 use crate::bridge::{BridgeEvent, EngineCommandSender, engine_subscription};
 use crate::widgets::{preview, timeline};
 
+const IDLE_WARM_MAX_ROUNDS: u16 = 120;
+
 /// UI messages handled by the iced app update loop.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -39,6 +41,7 @@ pub struct AppState {
     latest_requested_playhead_tl: Option<i64>,
     playhead_request_in_flight: bool,
     idle_warm_target_tl: Option<i64>,
+    idle_warm_rounds: u16,
     last_preview_ready_tl: Option<i64>,
     loaded_preview_ranges_tl: Vec<(i64, i64)>,
     pending_split_tl: Option<i64>,
@@ -63,6 +66,7 @@ impl AppState {
                 latest_requested_playhead_tl: None,
                 playhead_request_in_flight: false,
                 idle_warm_target_tl: None,
+                idle_warm_rounds: 0,
                 last_preview_ready_tl: None,
                 loaded_preview_ranges_tl: Vec::new(),
                 pending_split_tl: None,
@@ -170,6 +174,7 @@ impl AppState {
                 self.latest_requested_playhead_tl = None;
                 self.playhead_request_in_flight = false;
                 self.idle_warm_target_tl = None;
+                self.idle_warm_rounds = 0;
                 self.last_preview_ready_tl = None;
                 self.loaded_preview_ranges_tl.clear();
                 self.pending_split_tl = None;
@@ -202,15 +207,22 @@ impl AppState {
         }
     }
 
-    fn queue_playhead(&mut self, t_tl: i64) {
+    fn queue_playhead(&mut self, t_tl: i64, update_latest: bool) {
         self.pending_playhead_tl = Some(t_tl);
-        self.latest_requested_playhead_tl = Some(t_tl);
+        if update_latest {
+            self.latest_requested_playhead_tl = Some(t_tl);
+        }
         self.flush_playhead_request();
     }
 
     fn queue_playhead_from_user(&mut self, t_tl: i64) {
         self.idle_warm_target_tl = None;
-        self.queue_playhead(t_tl);
+        self.idle_warm_rounds = 0;
+        self.queue_playhead(t_tl, true);
+    }
+
+    fn queue_playhead_for_idle_warm(&mut self, t_tl: i64) {
+        self.queue_playhead(t_tl, false);
     }
 
     fn request_split(&mut self, at_tl: i64) {
@@ -314,6 +326,7 @@ impl AppState {
                 self.latest_requested_playhead_tl = None;
                 self.playhead_request_in_flight = false;
                 self.idle_warm_target_tl = None;
+                self.idle_warm_rounds = 0;
                 self.last_preview_ready_tl = None;
                 self.last_split_tl = None;
                 let pending_split_tl = self.pending_split_tl.take();
@@ -350,8 +363,13 @@ impl AppState {
                 self.playhead_request_in_flight = false;
                 self.flush_playhead_request();
                 if self.preview_image.is_some() && self.should_queue_idle_warm(t_tl) {
-                    self.idle_warm_target_tl = Some(t_tl);
-                    self.queue_playhead(t_tl);
+                    if self.idle_warm_target_tl != Some(t_tl) {
+                        self.idle_warm_target_tl = Some(t_tl);
+                        self.idle_warm_rounds = 0;
+                    }
+                    self.idle_warm_rounds = self.idle_warm_rounds.saturating_add(1);
+                    self.record_idle_warm_loaded_hint(t_tl, self.idle_warm_rounds);
+                    self.queue_playhead_for_idle_warm(t_tl);
                 }
             }
             Event::ExportProgress { done, total } => {
@@ -490,12 +508,23 @@ impl AppState {
             .unwrap_or(engine::DEFAULT_PREVIEW_CACHE_BUCKET_TL)
     }
 
+    fn record_idle_warm_loaded_hint(&mut self, t_tl: i64, warm_round: u16) {
+        let bucket_tl = self.preview_bucket_tl();
+        let step = i64::from((warm_round + 1) / 2);
+        let direction = if warm_round % 2 == 1 { 1 } else { -1 };
+        let offset = bucket_tl
+            .saturating_mul(step)
+            .saturating_mul(direction);
+        self.add_loaded_bucket_for_tick(t_tl.saturating_add(offset));
+    }
+
     fn should_queue_idle_warm(&self, t_tl: i64) -> bool {
         self.project.is_some()
             && self.latest_requested_playhead_tl == Some(t_tl)
             && self.pending_playhead_tl.is_none()
             && !self.playhead_request_in_flight
-            && self.idle_warm_target_tl != Some(t_tl)
+            && self.idle_warm_target_tl.map_or(true, |target| target == t_tl)
+            && self.idle_warm_rounds < IDLE_WARM_MAX_ROUNDS
     }
 
     /// Renders the UI tree.
@@ -583,6 +612,7 @@ impl AppState {
             latest_requested_playhead_tl: None,
             playhead_request_in_flight: false,
             idle_warm_target_tl: None,
+            idle_warm_rounds: 0,
             last_preview_ready_tl: None,
             loaded_preview_ranges_tl: Vec::new(),
             pending_split_tl: None,
@@ -936,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_frame_ready_when_idle_queues_one_more_playhead_for_warm_prefetch() {
+    fn preview_frame_ready_when_idle_queues_additional_playhead_for_progressive_warm_prefetch() {
         let (command_tx, command_rx) = mpsc::sync_channel(8);
         let mut app = AppState::from_sender_for_test(command_tx);
         let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
@@ -985,7 +1015,83 @@ mod tests {
                 },
             },
         )));
+        let third = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second idle warm set playhead command");
+        assert_eq!(third, Command::SetPlayhead { t_tl: 40 });
+    }
+
+    #[test]
+    fn scrub_after_idle_warm_in_flight_still_updates_preview() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 200,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(40));
+        let first = command_rx.recv().expect("first set playhead command");
+        assert_eq!(first, Command::SetPlayhead { t_tl: 40 });
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 40,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 4]),
+                },
+            },
+        )));
+        let warm = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("idle warm set playhead command");
+        assert_eq!(warm, Command::SetPlayhead { t_tl: 40 });
+
+        let _ = app.update(Message::TimelineScrubbed(80));
         assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PlayheadChanged { t_tl: 40 },
+        )));
+        let second = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second set playhead command");
+        assert_eq!(second, Command::SetPlayhead { t_tl: 80 });
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 40,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 4]),
+                },
+            },
+        )));
+        assert_eq!(app.playhead_tl, 80);
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 80,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![1_u8; 4]),
+                },
+            },
+        )));
+
+        assert_eq!(app.playhead_tl, 80);
+        assert!(app.preview_image.is_some());
     }
 
     #[test]
