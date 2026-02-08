@@ -318,6 +318,7 @@ All FFmpeg objects live and die within their owning worker thread.
 ### 6.2 Communication
 - Use channels with explicit backpressure where appropriate.
 - Preview requests are **coalesced**: only the newest request is processed during scrubbing.
+- UI treats `PlayheadChanged` / `PreviewFrameReady` as stale when `t_tl` does not match the latest requested playhead tick.
 
 ### 6.3 Cancellation
 - Preview: coalescing effectively cancels older requests.
@@ -368,8 +369,14 @@ Goal: for a requested playhead time `t_tl` (timeline ticks), produce a preview f
 - Optimization path: deliver **NV12** and do YUV→RGB in GPU shader
 
 **Caching**
-- LRU cache by `(asset_id, size, coarse_bucket(src_target_video_ts))`
-- Additionally cache “seek contexts” (decoder warmed near certain regions) to speed scrubbing.
+- Keep a RAM LRU cache for decoded frames, keyed by `(source_path, coarse_bucket(source_tl))`.
+- Bucket width is fixed (currently `33_333` timeline ticks, ~30fps bucket granularity).
+- On a cache miss, decode and insert into cache; then prefetch neighbor buckets.
+- Neighbor prefetch is direction-aware:
+  - if scrubbing forward: prefetch `+1` bucket
+  - if scrubbing backward: prefetch `-1` bucket
+  - if direction unknown: prefetch both `+1` and `-1`
+- Invalidate preview cache on timeline-mutating operations (`Import`, `Split`, `Cut`, `MoveSegment`, `TrimSegmentStart`, `TrimSegmentEnd`) to avoid stale source mappings.
 
 ### 7.3 Export: decode → retimestamp → encode → mux
 We explicitly choose re-encode for correctness and simplicity.
@@ -503,6 +510,7 @@ Practical pattern:
 This lets `update` be purely synchronous:
 - if `engine_tx.is_some()` → send command
 - if not ready yet → keep only the newest scrub request (coalescing)
+- guard against delayed engine events by comparing event `t_tl` with the latest requested playhead tick
 
 ### 8.4 Preview widget (RGBA-first, GPU path later)
 **MVP default**: engine delivers `PreviewFrame { format: Rgba8, bytes }`.
@@ -514,6 +522,7 @@ UI conversion:
 
 Performance notes (still MVP-safe):
 - Scrubbing can trigger many frames. Keep **only the latest** preview handle.
+- Drop stale `PreviewFrameReady` events (older `t_tl`) to prevent visible seek rollback/flicker.
 - Optional: downscale preview in engine to a fixed maximum size to bound upload bandwidth.
 
 **Post-MVP optimization**:
@@ -523,6 +532,7 @@ Performance notes (still MVP-safe):
 Use `Canvas` for:
 - drawing segment rectangles proportional to `timeline_duration`
 - drawing playhead line at `t_tl`
+- drawing a loaded-preview strip (timeline ranges already present in RAM cache)
 - hit-testing clicks/drags:
   - click → set playhead
   - drag → scrub
@@ -533,6 +543,7 @@ MVP interaction model:
 - UI update coalesces scrub updates and sends at most one in-flight `Command::SetPlayhead { t_tl }`
 - UI playhead and timeline slider both clamp to `[0, duration_tl - 1]` (when `duration_tl > 0`)
 - engine emits `PreviewFrameReady { t_tl, frame }` asynchronously
+- UI merges loaded ranges by preview bucket and renders them as a top progress strip on timeline
 
 ### 8.6 File dialogs + export progress UI (Tasks + events)
 File dialogs should live in UI (engine remains pure):
