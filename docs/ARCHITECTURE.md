@@ -215,8 +215,8 @@ pub struct Segment {
 ```
 
 Invariant (MVP):
-- `segments` are contiguous (no gaps) unless explicitly allowed.
-- Cuts are exactly segment boundaries.
+- `Split(at_tl)` preserves contiguity.
+- `Cut(at_tl)`, `MoveSegment`, and `TrimSegmentStart/End` may leave gaps by design (no implicit ripple/compaction).
 - `timeline_duration` is authoritative; it determines export length.
 
 ### 4.4 Editing operations (MVP)
@@ -224,6 +224,16 @@ Invariant (MVP):
   - find segment containing `at_tl`
   - compute `src_at` for video/audio by mapping `at_tl` into source time bases
   - replace with two segments, adjusting `src_in/out` and `timeline_duration`
+- `Cut(at_tl)`:
+  - remove the segment starting at `at_tl`, or the segment containing `at_tl` when not on a boundary
+  - keep following segment starts unchanged (gaps are preserved)
+- `MoveSegment(segment_id, new_start_tl)`:
+  - move one segment start while preserving its source range
+  - clamp to avoid overlap with adjacent segments
+  - may introduce/keep gaps
+- `TrimSegmentStart(segment_id, new_start_tl)` / `TrimSegmentEnd(segment_id, new_end_tl)`:
+  - trim one segment edge while preserving timeline order
+  - may introduce/keep gaps
 - `RippleDelete(range_tl)` (optional):
   - remove portions, shift later segments left to close gaps
 
@@ -240,6 +250,10 @@ pub enum Command {
 
   SetPlayhead { t_tl: i64 },    // timeline ticks, clamped to [0, duration_tl - 1]
   Split { at_tl: i64 },
+  Cut { at_tl: i64 },
+  MoveSegment { segment_id: SegmentId, new_start_tl: i64 },
+  TrimSegmentStart { segment_id: SegmentId, new_start_tl: i64 },
+  TrimSegmentEnd { segment_id: SegmentId, new_end_tl: i64 },
 
   Export { path: PathBuf, settings: ExportSettings },
   CancelExport,

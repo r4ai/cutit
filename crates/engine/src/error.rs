@@ -11,6 +11,9 @@ pub enum EngineError {
     SegmentNotFound {
         at_tl: i64,
     },
+    SegmentIdNotFound {
+        segment_id: u64,
+    },
     SplitPointAtBoundary {
         at_tl: i64,
     },
@@ -67,6 +70,9 @@ impl Display for EngineError {
             Self::ProjectNotLoaded => write!(f, "project is not loaded"),
             Self::SegmentNotFound { at_tl } => {
                 write!(f, "segment not found at timeline timestamp {at_tl}")
+            }
+            Self::SegmentIdNotFound { segment_id } => {
+                write!(f, "segment not found: {segment_id}")
             }
             Self::SplitPointAtBoundary { at_tl } => {
                 write!(f, "cannot split at segment boundary: {at_tl}")

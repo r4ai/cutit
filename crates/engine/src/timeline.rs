@@ -142,11 +142,80 @@ impl Timeline {
         Ok(())
     }
 
+    /// Cuts one segment at timeline timestamp `at_tl`.
+    ///
+    /// When `at_tl` is exactly a segment start boundary, the segment starting
+    /// at that boundary is removed. Otherwise, the segment containing `at_tl`
+    /// is removed. Following segments keep their start positions, which leaves
+    /// a gap in the timeline.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use engine::timeline::{Segment, Timeline};
+    ///
+    /// let mut timeline = Timeline {
+    ///     segments: vec![
+    ///         Segment {
+    ///             id: 1,
+    ///             asset_id: 7,
+    ///             src_in_video: Some(0),
+    ///             src_out_video: Some(90_000),
+    ///             src_in_audio: None,
+    ///             src_out_audio: None,
+    ///             timeline_start: 0,
+    ///             timeline_duration: 1_000_000,
+    ///         },
+    ///         Segment {
+    ///             id: 2,
+    ///             asset_id: 7,
+    ///             src_in_video: Some(90_000),
+    ///             src_out_video: Some(180_000),
+    ///             src_in_audio: None,
+    ///             src_out_audio: None,
+    ///             timeline_start: 1_000_000,
+    ///             timeline_duration: 1_000_000,
+    ///         },
+    ///     ],
+    /// };
+    ///
+    /// let removed = timeline.cut_segment(1_000_000).unwrap();
+    /// assert_eq!(removed.id, 2);
+    /// assert_eq!(timeline.duration_tl(), 1_000_000);
+    /// ```
+    pub fn cut_segment(&mut self, at_tl: i64) -> Result<Segment> {
+        let index = self
+            .find_cut_segment_index(at_tl)
+            .ok_or(EngineError::SegmentNotFound { at_tl })?;
+        let removed = self.segments.remove(index);
+
+        debug!(
+            at_tl,
+            removed_segment_id = removed.id,
+            segment_count = self.segments.len(),
+            "cut accepted"
+        );
+
+        Ok(removed)
+    }
+
     pub(crate) fn is_boundary_split_point(&self, at_tl: i64) -> bool {
         self.segments.iter().any(|segment| {
             let end = segment.timeline_start + segment.timeline_duration;
             at_tl == segment.timeline_start || at_tl == end
         })
+    }
+
+    fn find_cut_segment_index(&self, at_tl: i64) -> Option<usize> {
+        self.segments
+            .iter()
+            .position(|segment| segment.timeline_start == at_tl)
+            .or_else(|| self.find_segment_index(at_tl))
+    }
+
+    pub(crate) fn find_segment_index_by_id(&self, segment_id: SegmentId) -> Option<usize> {
+        self.segments
+            .iter()
+            .position(|segment| segment.id == segment_id)
     }
 }
 
@@ -190,5 +259,84 @@ mod tests {
             result,
             Err(EngineError::SplitPointAtBoundary { at_tl: 1_000 })
         ));
+    }
+
+    #[test]
+    fn cut_at_boundary_removes_segment_starting_at_boundary() {
+        let mut timeline = Timeline {
+            segments: vec![
+                Segment {
+                    id: 1,
+                    asset_id: 1,
+                    src_in_video: Some(0),
+                    src_out_video: Some(10),
+                    src_in_audio: None,
+                    src_out_audio: None,
+                    timeline_start: 0,
+                    timeline_duration: 100,
+                },
+                Segment {
+                    id: 2,
+                    asset_id: 1,
+                    src_in_video: Some(10),
+                    src_out_video: Some(20),
+                    src_in_audio: None,
+                    src_out_audio: None,
+                    timeline_start: 100,
+                    timeline_duration: 100,
+                },
+            ],
+        };
+
+        let removed = timeline.cut_segment(100).expect("cut should succeed");
+        assert_eq!(removed.id, 2);
+        assert_eq!(timeline.segments.len(), 1);
+        assert_eq!(timeline.duration_tl(), 100);
+        assert_eq!(timeline.segments[0].timeline_start, 0);
+    }
+
+    #[test]
+    fn cut_middle_segment_keeps_gap_between_remaining_segments() {
+        let mut timeline = Timeline {
+            segments: vec![
+                Segment {
+                    id: 1,
+                    asset_id: 1,
+                    src_in_video: Some(0),
+                    src_out_video: Some(10),
+                    src_in_audio: None,
+                    src_out_audio: None,
+                    timeline_start: 0,
+                    timeline_duration: 100,
+                },
+                Segment {
+                    id: 2,
+                    asset_id: 1,
+                    src_in_video: Some(10),
+                    src_out_video: Some(20),
+                    src_in_audio: None,
+                    src_out_audio: None,
+                    timeline_start: 100,
+                    timeline_duration: 100,
+                },
+                Segment {
+                    id: 3,
+                    asset_id: 1,
+                    src_in_video: Some(20),
+                    src_out_video: Some(30),
+                    src_in_audio: None,
+                    src_out_audio: None,
+                    timeline_start: 200,
+                    timeline_duration: 100,
+                },
+            ],
+        };
+
+        let removed = timeline.cut_segment(150).expect("cut should succeed");
+        assert_eq!(removed.id, 2);
+        assert_eq!(timeline.segments.len(), 2);
+        assert_eq!(timeline.segments[1].id, 3);
+        assert_eq!(timeline.segments[1].timeline_start, 200);
+        assert_eq!(timeline.duration_tl(), 300);
     }
 }

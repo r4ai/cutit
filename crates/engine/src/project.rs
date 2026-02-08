@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::api::{MediaAssetSummary, ProjectSnapshot, SegmentSummary};
 use crate::error::{EngineError, Result};
 use crate::preview::{ProbedAudioStream, ProbedMedia, ProbedVideoStream};
-use crate::time::{TIMELINE_TIME_BASE, rescale};
+use crate::time::{Rational, TIMELINE_TIME_BASE, rescale};
 use crate::timeline::{AssetId, Segment, SegmentId, Timeline};
 use serde::{Deserialize, Serialize};
 
@@ -266,6 +266,108 @@ impl Project {
         )
     }
 
+    /// Cuts one segment at `at_tl` and keeps timeline gaps.
+    ///
+    /// When `at_tl` points to a segment start boundary, the segment starting
+    /// at that boundary is removed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut project = /* construct project */;
+    /// project.cut(500_000).unwrap();
+    /// ```
+    pub fn cut(&mut self, at_tl: i64) -> Result<()> {
+        let _ = self.timeline.cut_segment(at_tl)?;
+        Ok(())
+    }
+
+    /// Moves one segment start time without changing its source range.
+    ///
+    /// The move is clamped so that segment order stays stable and no overlap is
+    /// introduced with adjacent segments.
+    pub fn move_segment(&mut self, segment_id: SegmentId, new_start_tl: i64) -> Result<()> {
+        let index = self
+            .timeline
+            .find_segment_index_by_id(segment_id)
+            .ok_or(EngineError::SegmentIdNotFound { segment_id })?;
+
+        let prev_end = if index == 0 {
+            0
+        } else {
+            let prev = &self.timeline.segments[index - 1];
+            prev.timeline_start.saturating_add(prev.timeline_duration)
+        };
+        let duration = self.timeline.segments[index].timeline_duration;
+        let max_start = if index + 1 < self.timeline.segments.len() {
+            self.timeline.segments[index + 1]
+                .timeline_start
+                .saturating_sub(duration)
+        } else {
+            i64::MAX.saturating_sub(duration.max(0))
+        };
+        let clamped = new_start_tl.max(0).clamp(prev_end, max_start.max(prev_end));
+        self.timeline.segments[index].timeline_start = clamped;
+        Ok(())
+    }
+
+    /// Trims the start edge of one segment.
+    pub fn trim_segment_start(&mut self, segment_id: SegmentId, new_start_tl: i64) -> Result<()> {
+        let index = self
+            .timeline
+            .find_segment_index_by_id(segment_id)
+            .ok_or(EngineError::SegmentIdNotFound { segment_id })?;
+        let segment = &self.timeline.segments[index];
+        let asset = self.asset_by_id(segment.asset_id)?;
+        let video_tb = asset.video.map(|video| video.time_base);
+        let audio_tb = asset.audio.map(|audio| audio.time_base);
+
+        let prev_end = if index == 0 {
+            0
+        } else {
+            let prev = &self.timeline.segments[index - 1];
+            prev.timeline_start + prev.timeline_duration
+        };
+        let old_start = segment.timeline_start;
+        let old_end = old_start + segment.timeline_duration;
+        let clamped_start = new_start_tl.clamp(prev_end, old_end - 1);
+        let delta_tl = clamped_start - old_start;
+
+        let segment = &mut self.timeline.segments[index];
+        segment.timeline_start = clamped_start;
+        segment.timeline_duration = old_end - clamped_start;
+        segment.src_in_video = shift_stream_point(segment.src_in_video, delta_tl, video_tb);
+        segment.src_in_audio = shift_stream_point(segment.src_in_audio, delta_tl, audio_tb);
+        Ok(())
+    }
+
+    /// Trims the end edge of one segment.
+    pub fn trim_segment_end(&mut self, segment_id: SegmentId, new_end_tl: i64) -> Result<()> {
+        let index = self
+            .timeline
+            .find_segment_index_by_id(segment_id)
+            .ok_or(EngineError::SegmentIdNotFound { segment_id })?;
+        let segment = &self.timeline.segments[index];
+        let asset = self.asset_by_id(segment.asset_id)?;
+        let video_tb = asset.video.map(|video| video.time_base);
+        let audio_tb = asset.audio.map(|audio| audio.time_base);
+
+        let old_start = segment.timeline_start;
+        let old_end = old_start + segment.timeline_duration;
+        let next_start = if index + 1 < self.timeline.segments.len() {
+            self.timeline.segments[index + 1].timeline_start
+        } else {
+            i64::MAX
+        };
+        let clamped_end = new_end_tl.clamp(old_start + 1, next_start);
+        let delta_tl = clamped_end - old_end;
+
+        let segment = &mut self.timeline.segments[index];
+        segment.timeline_duration = clamped_end - old_start;
+        segment.src_out_video = shift_stream_point(segment.src_out_video, delta_tl, video_tb);
+        segment.src_out_audio = shift_stream_point(segment.src_out_audio, delta_tl, audio_tb);
+        Ok(())
+    }
+
     fn asset_by_id(&self, asset_id: AssetId) -> Result<&MediaAsset> {
         self.assets
             .iter()
@@ -311,7 +413,7 @@ impl Project {
             }
         }
 
-        let mut expected_start = 0_i64;
+        let mut previous_end: Option<i64> = None;
         let mut seen_segment_ids = HashSet::new();
         for segment in &self.timeline.segments {
             if !seen_segment_ids.insert(segment.id) {
@@ -320,11 +422,11 @@ impl Project {
                 });
             }
 
-            if segment.timeline_start != expected_start {
+            if segment.timeline_start < 0 {
                 return Err(EngineError::InvalidProjectFile {
                     reason: format!(
-                        "segment {} starts at {} but expected {}",
-                        segment.id, segment.timeline_start, expected_start
+                        "segment {} starts at negative timeline {}",
+                        segment.id, segment.timeline_start
                     ),
                 });
             }
@@ -340,16 +442,40 @@ impl Project {
             let asset = self.asset_by_id(segment.asset_id)?;
             validate_segment_ranges(asset, segment)?;
 
-            expected_start = segment
+            let segment_end = segment
                 .timeline_start
                 .checked_add(segment.timeline_duration)
                 .ok_or_else(|| EngineError::InvalidProjectFile {
                     reason: format!("segment {} timeline range overflowed i64", segment.id),
                 })?;
+            if let Some(previous_end) = previous_end
+                && segment.timeline_start < previous_end
+            {
+                return Err(EngineError::InvalidProjectFile {
+                    reason: format!(
+                        "segment {} overlaps previous segment at {}",
+                        segment.id, segment.timeline_start
+                    ),
+                });
+            }
+            previous_end = Some(segment_end);
         }
 
         Ok(())
     }
+}
+
+fn shift_stream_point(
+    point: Option<i64>,
+    delta_tl: i64,
+    time_base: Option<Rational>,
+) -> Option<i64> {
+    let (Some(point), Some(time_base)) = (point, time_base) else {
+        return point;
+    };
+    let delta_stream = rescale(delta_tl, TIMELINE_TIME_BASE, time_base);
+    let shifted = point.saturating_add(delta_stream);
+    Some(shifted.max(0))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,6 +645,41 @@ mod tests {
     }
 
     #[test]
+    fn move_segment_clamps_last_segment_to_prevent_timeline_overflow() {
+        let mut project = sample_project();
+        let duration = project.timeline.segments[0].timeline_duration;
+
+        project
+            .move_segment(1, i64::MAX)
+            .expect("move should succeed");
+
+        let moved = &project.timeline.segments[0];
+        assert_eq!(moved.timeline_start, i64::MAX - duration);
+        assert_eq!(project.timeline.duration_tl(), i64::MAX);
+    }
+
+    #[test]
+    fn trim_segment_start_clamps_shifted_stream_points_to_zero() {
+        let mut project = sample_project();
+        let segment = &mut project.timeline.segments[0];
+        segment.timeline_start = 100;
+        segment.src_in_video = Some(5);
+        segment.src_out_video = Some(50);
+        segment.src_in_audio = Some(3);
+        segment.src_out_audio = Some(30);
+
+        project
+            .trim_segment_start(1, 0)
+            .expect("trim start should succeed");
+
+        let trimmed = &project.timeline.segments[0];
+        assert_eq!(trimmed.src_in_video, Some(0));
+        assert_eq!(trimmed.src_out_video, Some(50));
+        assert_eq!(trimmed.src_in_audio, Some(0));
+        assert_eq!(trimmed.src_out_audio, Some(30));
+    }
+
+    #[test]
     fn project_persistence_allows_zero_length_stream_ranges() {
         let mut project = sample_project();
         let segment = &mut project.timeline.segments[0];
@@ -533,6 +694,29 @@ mod tests {
         assert_eq!(loaded.timeline.segments[0].src_out_video, Some(90_000));
         assert_eq!(loaded.timeline.segments[0].src_in_audio, Some(48_000));
         assert_eq!(loaded.timeline.segments[0].src_out_audio, Some(48_000));
+        fs::remove_file(path).expect("cleanup persisted file");
+    }
+
+    #[test]
+    fn project_persistence_allows_gaps_between_segments() {
+        let mut project = sample_project();
+        project.timeline.segments.push(Segment {
+            id: 2,
+            asset_id: 1,
+            src_in_video: Some(180_000),
+            src_out_video: Some(198_000),
+            src_in_audio: Some(96_000),
+            src_out_audio: Some(105_600),
+            timeline_start: 1_500_000,
+            timeline_duration: 200_000,
+        });
+        let path = temp_file_path("project-gap-segments", "json");
+
+        project.save_to_file(&path).expect("save should succeed");
+        let loaded = Project::load_from_file(&path).expect("load should succeed");
+
+        assert_eq!(loaded.timeline.segments.len(), 2);
+        assert_eq!(loaded.timeline.segments[1].timeline_start, 1_500_000);
         fs::remove_file(path).expect("cleanup persisted file");
     }
 
