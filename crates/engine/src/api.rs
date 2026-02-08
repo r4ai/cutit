@@ -528,7 +528,9 @@ where
 fn prefetch_offsets(direction: ScrubDirection) -> Vec<i64> {
     match direction {
         ScrubDirection::Forward => (1..=PREFETCH_RADIUS_DIRECTIONAL).collect(),
-        ScrubDirection::Backward => (1..=PREFETCH_RADIUS_DIRECTIONAL).map(|offset| -offset).collect(),
+        ScrubDirection::Backward => (1..=PREFETCH_RADIUS_DIRECTIONAL)
+            .map(|offset| -offset)
+            .collect(),
         ScrubDirection::Unknown => {
             let mut offsets = Vec::with_capacity((PREFETCH_RADIUS_IDLE * 2) as usize);
             for step in 1..=PREFETCH_RADIUS_IDLE {

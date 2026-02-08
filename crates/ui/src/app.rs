@@ -510,11 +510,9 @@ impl AppState {
 
     fn record_idle_warm_loaded_hint(&mut self, t_tl: i64, warm_round: u16) {
         let bucket_tl = self.preview_bucket_tl();
-        let step = i64::from((warm_round + 1) / 2);
+        let step = i64::from(warm_round.div_ceil(2));
         let direction = if warm_round % 2 == 1 { 1 } else { -1 };
-        let offset = bucket_tl
-            .saturating_mul(step)
-            .saturating_mul(direction);
+        let offset = bucket_tl.saturating_mul(step).saturating_mul(direction);
         self.add_loaded_bucket_for_tick(t_tl.saturating_add(offset));
     }
 
@@ -523,7 +521,7 @@ impl AppState {
             && self.latest_requested_playhead_tl == Some(t_tl)
             && self.pending_playhead_tl.is_none()
             && !self.playhead_request_in_flight
-            && self.idle_warm_target_tl.map_or(true, |target| target == t_tl)
+            && self.idle_warm_target_tl.is_none_or(|target| target == t_tl)
             && self.idle_warm_rounds < IDLE_WARM_MAX_ROUNDS
     }
 
