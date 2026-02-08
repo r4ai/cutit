@@ -59,6 +59,7 @@ struct TimelineProgram<'a, Message> {
     duration_tl: i64,
     playhead_tl: i64,
     split_feedback_tl: Option<i64>,
+    loaded_preview_ranges_tl: &'a [(i64, i64)],
     segments: &'a [SegmentSummary],
     cache: &'a canvas::Cache,
     on_scrub: fn(i64) -> Message,
@@ -309,6 +310,20 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 return;
             }
 
+            for (start_tl, end_tl) in self.loaded_preview_ranges_tl {
+                let clamped_start = (*start_tl).clamp(0, self.duration_tl);
+                let clamped_end = (*end_tl).clamp(clamped_start, self.duration_tl);
+                if clamped_end <= clamped_start {
+                    continue;
+                }
+
+                let x = (clamped_start as f32 / self.duration_tl as f32) * bounds.width;
+                let width =
+                    ((clamped_end - clamped_start) as f32 / self.duration_tl as f32) * bounds.width;
+                let rect = Path::rectangle(Point::new(x, 0.0), Size::new(width.max(1.0), 5.0));
+                frame.fill(&rect, Color::from_rgba(0.35, 0.92, 0.53, 0.85));
+            }
+
             for segment in self.segments {
                 let x =
                     (segment.timeline_start.max(0) as f32 / self.duration_tl as f32) * bounds.width;
@@ -391,6 +406,7 @@ pub fn view<'a, Message>(
     snapshot: Option<&'a ProjectSnapshot>,
     playhead_tl: i64,
     split_feedback_tl: Option<i64>,
+    loaded_preview_ranges_tl: &'a [(i64, i64)],
     cache: &'a canvas::Cache,
     actions: TimelineActions<Message>,
 ) -> Element<'a, Message>
@@ -407,6 +423,7 @@ where
             duration_tl,
             playhead_tl,
             split_feedback_tl,
+            loaded_preview_ranges_tl,
             segments,
             cache,
             on_scrub: actions.on_scrub,
@@ -513,6 +530,7 @@ mod tests {
             duration_tl: 0,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &[],
             cache: &cache,
             on_scrub: |_| (),
@@ -543,6 +561,7 @@ mod tests {
             duration_tl: 10,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &[],
             cache: &cache,
             on_scrub: |_| (),
@@ -573,6 +592,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &[],
             cache: &cache,
             on_scrub: |tick| tick,
@@ -620,6 +640,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &[],
             cache: &cache,
             on_scrub: |tick| tick,
@@ -656,6 +677,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &[],
             cache: &cache,
             on_scrub: |_| -1,
@@ -691,6 +713,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &[],
             cache: &cache,
             on_scrub: |_| -1,
@@ -726,6 +749,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &[],
             cache: &cache,
             on_scrub: |_| -1,
@@ -762,6 +786,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |_| -1,
@@ -805,6 +830,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |_| -1,
@@ -848,6 +874,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |tick| tick,
@@ -891,6 +918,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |tick| tick,
@@ -928,6 +956,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |tick| tick,
@@ -965,6 +994,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |tick| tick,
@@ -1002,6 +1032,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |tick| tick,
@@ -1039,6 +1070,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |_| -1,
@@ -1082,6 +1114,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |_| -1,
@@ -1125,6 +1158,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |tick| tick,
@@ -1168,6 +1202,7 @@ mod tests {
             duration_tl: 100,
             playhead_tl: 0,
             split_feedback_tl: None,
+            loaded_preview_ranges_tl: &[],
             segments: &segments,
             cache: &cache,
             on_scrub: |_| -1,

@@ -66,6 +66,7 @@ pub struct AudioStreamInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewRequest {
     pub path: PathBuf,
+    pub source_tl: i64,
     pub source_seconds: f64,
 }
 
@@ -225,10 +226,12 @@ impl Project {
         let src_target_video_ts =
             src_in_video + rescale(local_tl, TIMELINE_TIME_BASE, video.time_base);
         let src_target_tl = rescale(src_target_video_ts, video.time_base, TIMELINE_TIME_BASE);
-        let source_seconds = (src_target_tl.max(0)) as f64 / TIMELINE_TIME_BASE.den as f64;
+        let source_tl = src_target_tl.max(0);
+        let source_seconds = source_tl as f64 / TIMELINE_TIME_BASE.den as f64;
 
         Ok(PreviewRequest {
             path: asset.path.clone(),
+            source_tl,
             source_seconds,
         })
     }
