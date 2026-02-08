@@ -21,6 +21,9 @@ pub enum Message {
     TimelineScrubbed(i64),
     TimelineSplitRequested(i64),
     TimelineCutRequested(i64),
+    TimelineSegmentMoveRequested { segment_id: u64, new_start_tl: i64 },
+    TimelineSegmentTrimStartRequested { segment_id: u64, new_start_tl: i64 },
+    TimelineSegmentTrimEndRequested { segment_id: u64, new_end_tl: i64 },
     Bridge(BridgeEvent),
 }
 
@@ -126,6 +129,24 @@ impl AppState {
                 self.request_cut(clamped);
                 self.queue_playhead(clamped);
             }
+            Message::TimelineSegmentMoveRequested {
+                segment_id,
+                new_start_tl,
+            } => {
+                self.request_move_segment(segment_id, new_start_tl);
+            }
+            Message::TimelineSegmentTrimStartRequested {
+                segment_id,
+                new_start_tl,
+            } => {
+                self.request_trim_segment_start(segment_id, new_start_tl);
+            }
+            Message::TimelineSegmentTrimEndRequested {
+                segment_id,
+                new_end_tl,
+            } => {
+                self.request_trim_segment_end(segment_id, new_end_tl);
+            }
             Message::Bridge(BridgeEvent::Ready(sender)) => {
                 self.engine_tx = Some(sender);
                 self.status = String::from("engine ready");
@@ -203,6 +224,33 @@ impl AppState {
         if self.send_command(Command::Cut { at_tl }) {
             self.pending_cut_tl = Some(at_tl);
             self.status = format!("cut requested at {}", at_tl);
+        }
+    }
+
+    fn request_move_segment(&mut self, segment_id: u64, new_start_tl: i64) {
+        if self.send_command(Command::MoveSegment {
+            segment_id,
+            new_start_tl,
+        }) {
+            self.status = format!("segment {} moved to {}", segment_id, new_start_tl);
+        }
+    }
+
+    fn request_trim_segment_start(&mut self, segment_id: u64, new_start_tl: i64) {
+        if self.send_command(Command::TrimSegmentStart {
+            segment_id,
+            new_start_tl,
+        }) {
+            self.status = format!("segment {} trim-start to {}", segment_id, new_start_tl);
+        }
+    }
+
+    fn request_trim_segment_end(&mut self, segment_id: u64, new_end_tl: i64) {
+        if self.send_command(Command::TrimSegmentEnd {
+            segment_id,
+            new_end_tl,
+        }) {
+            self.status = format!("segment {} trim-end to {}", segment_id, new_end_tl);
         }
     }
 
@@ -368,6 +416,18 @@ impl AppState {
             Message::TimelineScrubbed,
             Message::TimelineSplitRequested,
             Message::TimelineCutRequested,
+            |segment_id, new_start_tl| Message::TimelineSegmentMoveRequested {
+                segment_id,
+                new_start_tl,
+            },
+            |segment_id, new_start_tl| Message::TimelineSegmentTrimStartRequested {
+                segment_id,
+                new_start_tl,
+            },
+            |segment_id, new_end_tl| Message::TimelineSegmentTrimEndRequested {
+                segment_id,
+                new_end_tl,
+            },
         );
 
         let controls = column![
@@ -747,6 +807,66 @@ mod tests {
 
         let set_playhead = command_rx.recv().expect("set playhead command");
         assert_eq!(set_playhead, Command::SetPlayhead { t_tl: 99 });
+    }
+
+    #[test]
+    fn timeline_segment_move_requested_dispatches_move_segment_command() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+
+        let _ = app.update(Message::TimelineSegmentMoveRequested {
+            segment_id: 7,
+            new_start_tl: 345_000,
+        });
+
+        let command = command_rx.recv().expect("move segment command");
+        assert_eq!(
+            command,
+            Command::MoveSegment {
+                segment_id: 7,
+                new_start_tl: 345_000,
+            }
+        );
+    }
+
+    #[test]
+    fn timeline_segment_trim_start_requested_dispatches_trim_start_command() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+
+        let _ = app.update(Message::TimelineSegmentTrimStartRequested {
+            segment_id: 7,
+            new_start_tl: 123_000,
+        });
+
+        let command = command_rx.recv().expect("trim start command");
+        assert_eq!(
+            command,
+            Command::TrimSegmentStart {
+                segment_id: 7,
+                new_start_tl: 123_000,
+            }
+        );
+    }
+
+    #[test]
+    fn timeline_segment_trim_end_requested_dispatches_trim_end_command() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+
+        let _ = app.update(Message::TimelineSegmentTrimEndRequested {
+            segment_id: 7,
+            new_end_tl: 456_000,
+        });
+
+        let command = command_rx.recv().expect("trim end command");
+        assert_eq!(
+            command,
+            Command::TrimSegmentEnd {
+                segment_id: 7,
+                new_end_tl: 456_000,
+            }
+        );
     }
 
     #[test]

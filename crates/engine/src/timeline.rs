@@ -146,8 +146,8 @@ impl Timeline {
     ///
     /// When `at_tl` is exactly a segment start boundary, the segment starting
     /// at that boundary is removed. Otherwise, the segment containing `at_tl`
-    /// is removed. Following segments are shifted left to keep the timeline
-    /// contiguous.
+    /// is removed. Following segments keep their start positions, which leaves
+    /// a gap in the timeline.
     ///
     /// # Example
     /// ```ignore
@@ -187,16 +187,10 @@ impl Timeline {
             .find_cut_segment_index(at_tl)
             .ok_or(EngineError::SegmentNotFound { at_tl })?;
         let removed = self.segments.remove(index);
-        let removed_duration = removed.timeline_duration;
-
-        for segment in self.segments.iter_mut().skip(index) {
-            segment.timeline_start -= removed_duration;
-        }
 
         debug!(
             at_tl,
             removed_segment_id = removed.id,
-            removed_duration,
             segment_count = self.segments.len(),
             "cut accepted"
         );
@@ -216,6 +210,12 @@ impl Timeline {
             .iter()
             .position(|segment| segment.timeline_start == at_tl)
             .or_else(|| self.find_segment_index(at_tl))
+    }
+
+    pub(crate) fn find_segment_index_by_id(&self, segment_id: SegmentId) -> Option<usize> {
+        self.segments
+            .iter()
+            .position(|segment| segment.id == segment_id)
     }
 }
 
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn cut_middle_segment_shifts_following_segments_left() {
+    fn cut_middle_segment_keeps_gap_between_remaining_segments() {
         let mut timeline = Timeline {
             segments: vec![
                 Segment {
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(removed.id, 2);
         assert_eq!(timeline.segments.len(), 2);
         assert_eq!(timeline.segments[1].id, 3);
-        assert_eq!(timeline.segments[1].timeline_start, 100);
-        assert_eq!(timeline.duration_tl(), 200);
+        assert_eq!(timeline.segments[1].timeline_start, 200);
+        assert_eq!(timeline.duration_tl(), 300);
     }
 }

@@ -47,6 +47,18 @@ pub enum Command {
     Cut {
         at_tl: i64,
     },
+    MoveSegment {
+        segment_id: u64,
+        new_start_tl: i64,
+    },
+    TrimSegmentStart {
+        segment_id: u64,
+        new_start_tl: i64,
+    },
+    TrimSegmentEnd {
+        segment_id: u64,
+        new_end_tl: i64,
+    },
     Export {
         path: PathBuf,
         settings: ExportSettings,
@@ -78,6 +90,7 @@ impl From<&EngineError> for EngineErrorKind {
         match value {
             EngineError::SplitPointAtBoundary { .. } => Self::SplitPointAtBoundary,
             EngineError::SegmentNotFound { .. } => Self::SegmentNotFound,
+            EngineError::SegmentIdNotFound { .. } => Self::SegmentNotFound,
             _ => Self::Other,
         }
     }
@@ -173,6 +186,18 @@ where
             Command::SetPlayhead { t_tl } => self.set_playhead(t_tl),
             Command::Split { at_tl } => self.split(at_tl),
             Command::Cut { at_tl } => self.cut(at_tl),
+            Command::MoveSegment {
+                segment_id,
+                new_start_tl,
+            } => self.move_segment(segment_id, new_start_tl),
+            Command::TrimSegmentStart {
+                segment_id,
+                new_start_tl,
+            } => self.trim_segment_start(segment_id, new_start_tl),
+            Command::TrimSegmentEnd {
+                segment_id,
+                new_end_tl,
+            } => self.trim_segment_end(segment_id, new_end_tl),
             Command::Export { path, settings } => self.export(path, settings),
             Command::CancelExport => Ok(Vec::new()),
         }
@@ -199,18 +224,23 @@ where
         let clamped = normalize_playhead(t_tl, project.duration_tl());
         self.playhead_tl = clamped;
 
-        let request = project.preview_request_at(clamped)?;
-        let frame = self
-            .media
-            .decode_preview_frame(&request.path, request.source_seconds)?;
-
-        Ok(vec![
-            Event::PlayheadChanged { t_tl: clamped },
-            Event::PreviewFrameReady {
+        let mut events = vec![Event::PlayheadChanged { t_tl: clamped }];
+        let request = match project.preview_request_at(clamped) {
+            Ok(request) => Some(request),
+            Err(EngineError::SegmentNotFound { .. }) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(request) = request {
+            let frame = self
+                .media
+                .decode_preview_frame(&request.path, request.source_seconds)?;
+            events.push(Event::PreviewFrameReady {
                 t_tl: clamped,
                 frame,
-            },
-        ])
+            });
+        }
+
+        Ok(events)
     }
 
     fn split(&mut self, at_tl: i64) -> Result<Vec<Event>> {
@@ -251,6 +281,36 @@ where
             "cut applied"
         );
 
+        Ok(vec![Event::ProjectChanged(project.snapshot())])
+    }
+
+    fn move_segment(&mut self, segment_id: u64, new_start_tl: i64) -> Result<Vec<Event>> {
+        {
+            let project = self.project.as_mut().ok_or(EngineError::ProjectNotLoaded)?;
+            project.move_segment(segment_id, new_start_tl)?;
+        }
+        let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
+        self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
+        Ok(vec![Event::ProjectChanged(project.snapshot())])
+    }
+
+    fn trim_segment_start(&mut self, segment_id: u64, new_start_tl: i64) -> Result<Vec<Event>> {
+        {
+            let project = self.project.as_mut().ok_or(EngineError::ProjectNotLoaded)?;
+            project.trim_segment_start(segment_id, new_start_tl)?;
+        }
+        let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
+        self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
+        Ok(vec![Event::ProjectChanged(project.snapshot())])
+    }
+
+    fn trim_segment_end(&mut self, segment_id: u64, new_end_tl: i64) -> Result<Vec<Event>> {
+        {
+            let project = self.project.as_mut().ok_or(EngineError::ProjectNotLoaded)?;
+            project.trim_segment_end(segment_id, new_end_tl)?;
+        }
+        let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
+        self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
         Ok(vec![Event::ProjectChanged(project.snapshot())])
     }
 
@@ -415,36 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn cut_at_split_boundary_removes_right_segment() {
-        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
-        engine
-            .handle_command(Command::Import {
-                path: PathBuf::from("demo.mp4"),
-            })
-            .expect("import should succeed");
-        engine
-            .handle_command(Command::Split { at_tl: 333_333 })
-            .expect("split should succeed");
-
-        let events = engine
-            .handle_command(Command::Cut { at_tl: 333_333 })
-            .expect("cut should succeed");
-        let Event::ProjectChanged(snapshot) = &events[0] else {
-            panic!("cut must emit ProjectChanged");
-        };
-
-        assert_eq!(snapshot.duration_tl, 333_333);
-        assert_eq!(snapshot.segments.len(), 1);
-        assert_eq!(snapshot.segments[0].timeline_start, 0);
-        assert_eq!(snapshot.segments[0].timeline_duration, 333_333);
-        assert_eq!(snapshot.segments[0].src_in_video, Some(90_000));
-        assert_eq!(snapshot.segments[0].src_out_video, Some(120_000));
-        assert_eq!(snapshot.segments[0].src_in_audio, Some(48_000));
-        assert_eq!(snapshot.segments[0].src_out_audio, Some(64_000));
-    }
-
-    #[test]
-    fn cut_middle_segment_shifts_following_segments_left() {
+    fn cut_middle_segment_preserves_gap_in_timeline() {
         let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
         engine
             .handle_command(Command::Import {
@@ -465,24 +496,157 @@ mod tests {
             panic!("cut must emit ProjectChanged");
         };
 
-        assert_eq!(snapshot.duration_tl, 600_000);
+        assert_eq!(snapshot.duration_tl, 1_200_000);
         assert_eq!(snapshot.segments.len(), 2);
+        assert_eq!(snapshot.segments[0].timeline_start, 0);
+        assert_eq!(snapshot.segments[0].timeline_duration, 300_000);
+        assert_eq!(snapshot.segments[0].src_in_video, Some(90_000));
+        assert_eq!(snapshot.segments[0].src_out_video, Some(117_000));
+        assert_eq!(snapshot.segments[0].src_in_audio, Some(48_000));
+        assert_eq!(snapshot.segments[0].src_out_audio, Some(62_400));
 
-        let first = &snapshot.segments[0];
-        assert_eq!(first.timeline_start, 0);
-        assert_eq!(first.timeline_duration, 300_000);
-        assert_eq!(first.src_in_video, Some(90_000));
-        assert_eq!(first.src_out_video, Some(117_000));
-        assert_eq!(first.src_in_audio, Some(48_000));
-        assert_eq!(first.src_out_audio, Some(62_400));
+        assert_eq!(snapshot.segments[1].timeline_start, 900_000);
+        assert_eq!(snapshot.segments[1].timeline_duration, 300_000);
+        assert_eq!(snapshot.segments[1].src_in_video, Some(171_000));
+        assert_eq!(snapshot.segments[1].src_out_video, Some(198_000));
+        assert_eq!(snapshot.segments[1].src_in_audio, Some(91_200));
+        assert_eq!(snapshot.segments[1].src_out_audio, Some(105_600));
+    }
 
-        let second = &snapshot.segments[1];
-        assert_eq!(second.timeline_start, 300_000);
-        assert_eq!(second.timeline_duration, 300_000);
-        assert_eq!(second.src_in_video, Some(171_000));
-        assert_eq!(second.src_out_video, Some(198_000));
-        assert_eq!(second.src_in_audio, Some(91_200));
-        assert_eq!(second.src_out_audio, Some(105_600));
+    #[test]
+    fn move_segment_repositions_clip_without_changing_source_range() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 300_000 })
+            .expect("first split should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 900_000 })
+            .expect("second split should succeed");
+
+        let events = engine
+            .handle_command(Command::MoveSegment {
+                segment_id: 3,
+                new_start_tl: 1_000_000,
+            })
+            .expect("move should succeed");
+        let Event::ProjectChanged(snapshot) = &events[0] else {
+            panic!("move must emit ProjectChanged");
+        };
+
+        assert_eq!(snapshot.duration_tl, 1_300_000);
+        assert_eq!(snapshot.segments.len(), 3);
+
+        let moved = &snapshot.segments[2];
+        assert_eq!(moved.id, 3);
+        assert_eq!(moved.timeline_start, 1_000_000);
+        assert_eq!(moved.timeline_duration, 300_000);
+        assert_eq!(moved.src_in_video, Some(171_000));
+        assert_eq!(moved.src_out_video, Some(198_000));
+        assert_eq!(moved.src_in_audio, Some(91_200));
+        assert_eq!(moved.src_out_audio, Some(105_600));
+    }
+
+    #[test]
+    fn trim_segment_start_updates_timeline_and_source_in() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 300_000 })
+            .expect("first split should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 900_000 })
+            .expect("second split should succeed");
+
+        let events = engine
+            .handle_command(Command::TrimSegmentStart {
+                segment_id: 2,
+                new_start_tl: 400_000,
+            })
+            .expect("trim start should succeed");
+        let Event::ProjectChanged(snapshot) = &events[0] else {
+            panic!("trim start must emit ProjectChanged");
+        };
+
+        let trimmed = &snapshot.segments[1];
+        assert_eq!(trimmed.id, 2);
+        assert_eq!(trimmed.timeline_start, 400_000);
+        assert_eq!(trimmed.timeline_duration, 500_000);
+        assert_eq!(trimmed.src_in_video, Some(126_000));
+        assert_eq!(trimmed.src_out_video, Some(171_000));
+        assert_eq!(trimmed.src_in_audio, Some(67_200));
+        assert_eq!(trimmed.src_out_audio, Some(91_200));
+    }
+
+    #[test]
+    fn trim_segment_end_updates_timeline_and_source_out() {
+        let mut engine = Engine::new(MockBackend::new(sample_probed_media(), sample_frame()));
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 300_000 })
+            .expect("first split should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 900_000 })
+            .expect("second split should succeed");
+
+        let events = engine
+            .handle_command(Command::TrimSegmentEnd {
+                segment_id: 2,
+                new_end_tl: 800_000,
+            })
+            .expect("trim end should succeed");
+        let Event::ProjectChanged(snapshot) = &events[0] else {
+            panic!("trim end must emit ProjectChanged");
+        };
+
+        let trimmed = &snapshot.segments[1];
+        assert_eq!(trimmed.id, 2);
+        assert_eq!(trimmed.timeline_start, 300_000);
+        assert_eq!(trimmed.timeline_duration, 500_000);
+        assert_eq!(trimmed.src_in_video, Some(117_000));
+        assert_eq!(trimmed.src_out_video, Some(162_000));
+        assert_eq!(trimmed.src_in_audio, Some(62_400));
+        assert_eq!(trimmed.src_out_audio, Some(86_400));
+    }
+
+    #[test]
+    fn set_playhead_inside_gap_emits_playhead_changed_without_preview_decode() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let calls = backend.decode_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 300_000 })
+            .expect("first split should succeed");
+        engine
+            .handle_command(Command::Split { at_tl: 900_000 })
+            .expect("second split should succeed");
+        engine
+            .handle_command(Command::Cut { at_tl: 500_000 })
+            .expect("cut should succeed");
+
+        let events = engine
+            .handle_command(Command::SetPlayhead { t_tl: 600_000 })
+            .expect("set playhead should succeed");
+
+        assert_eq!(events, vec![Event::PlayheadChanged { t_tl: 600_000 }]);
+        assert!(calls.lock().expect("lock decode calls").is_empty());
     }
 
     #[test]

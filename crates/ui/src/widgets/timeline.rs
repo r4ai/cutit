@@ -51,7 +51,7 @@ enum DragMode {
 }
 
 const DRAG_START_THRESHOLD_PX: f32 = 4.0;
-const SEGMENT_VERTICAL_PADDING_PX: f32 = 10.0;
+const SEGMENT_VERTICAL_PADDING_PX: f32 = 12.0;
 
 #[derive(Debug)]
 struct TimelineProgram<'a, Message> {
@@ -770,7 +770,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(30.0, 10.0)),
+            mouse::Cursor::Available(Point::new(30.0, 20.0)),
         );
         assert_eq!(pressed, None);
 
@@ -778,7 +778,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(50.0, 10.0)),
+            mouse::Cursor::Available(Point::new(50.0, 20.0)),
         );
         assert_eq!(status, canvas::event::Status::Captured);
         assert_eq!(released, Some(7_040));
@@ -813,7 +813,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(30.0, 10.0)),
+            mouse::Cursor::Available(Point::new(30.0, 20.0)),
         );
         assert_eq!(pressed, None);
 
@@ -821,7 +821,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(30.0, 10.0)),
+            mouse::Cursor::Available(Point::new(30.0, 20.0)),
         );
         assert_eq!(status, canvas::event::Status::Captured);
         assert_eq!(released, Some(30));
@@ -939,6 +939,43 @@ mod tests {
     }
 
     #[test]
+    fn click_segment_body_just_below_current_margin_dispatches_scrub() {
+        let cache = iced::widget::canvas::Cache::new();
+        let segments = vec![sample_segment(7, 20, 40)];
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &segments,
+            cache: &cache,
+            on_scrub: |tick| tick,
+            on_split: |_| -2,
+            on_cut: |_| -3,
+            on_move: |_, _| -4,
+            on_trim_start: |_, _| -5,
+            on_trim_end: |_, _| -6,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (status, pressed) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(30.0, 11.0)),
+        );
+
+        assert_eq!(status, canvas::event::Status::Captured);
+        assert_eq!(pressed, Some(30));
+        assert!(matches!(state.drag_mode, Some(DragMode::Scrub)));
+    }
+
+    #[test]
     fn drag_segment_start_edge_dispatches_trim_start_on_release() {
         let cache = iced::widget::canvas::Cache::new();
         let segments = vec![sample_segment(7, 20, 40)];
@@ -967,7 +1004,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(20.0, 10.0)),
+            mouse::Cursor::Available(Point::new(20.0, 20.0)),
         );
         assert_eq!(pressed, None);
 
@@ -975,7 +1012,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(25.0, 10.0)),
+            mouse::Cursor::Available(Point::new(25.0, 20.0)),
         );
         assert_eq!(status, canvas::event::Status::Captured);
         assert_eq!(released, Some(7_025));
@@ -1010,7 +1047,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(20.0, 10.0)),
+            mouse::Cursor::Available(Point::new(20.0, 20.0)),
         );
         assert_eq!(pressed, None);
 
@@ -1018,7 +1055,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(20.0, 10.0)),
+            mouse::Cursor::Available(Point::new(20.0, 20.0)),
         );
         assert_eq!(status, canvas::event::Status::Captured);
         assert_eq!(released, Some(20));
@@ -1053,7 +1090,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(60.0, 10.0)),
+            mouse::Cursor::Available(Point::new(60.0, 20.0)),
         );
         assert_eq!(pressed, None);
 
@@ -1061,7 +1098,7 @@ mod tests {
             &mut state,
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(70.0, 10.0)),
+            mouse::Cursor::Available(Point::new(70.0, 20.0)),
         );
         assert_eq!(status, canvas::event::Status::Captured);
         assert_eq!(released, Some(7_070));
