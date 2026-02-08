@@ -370,12 +370,12 @@ Goal: for a requested playhead time `t_tl` (timeline ticks), produce a preview f
 
 **Caching**
 - Keep a RAM LRU cache for decoded frames, keyed by `(source_path, coarse_bucket(source_tl))`.
-- Bucket width is fixed (currently `33_333` timeline ticks, ~30fps bucket granularity).
-- On a cache miss, decode and insert into cache; then prefetch neighbor buckets.
+- Bucket width is derived from source metadata (prefer video frame rate; fallback to stream time base tick). A default value is used only when metadata is missing.
+- On a cache miss, decode and insert into cache (no synchronous neighbor prefetch on miss).
 - Neighbor prefetch is direction-aware:
-  - if scrubbing forward: prefetch `+1` bucket
-  - if scrubbing backward: prefetch `-1` bucket
-  - if direction unknown: prefetch both `+1` and `-1`
+  - if scrubbing forward: prefetch multiple `+N` buckets
+  - if scrubbing backward: prefetch multiple `-N` buckets
+  - if direction unknown (idle same-position request): prefetch a wider window in both directions
 - Invalidate preview cache on timeline-mutating operations (`Import`, `Split`, `Cut`, `MoveSegment`, `TrimSegmentStart`, `TrimSegmentEnd`) to avoid stale source mappings.
 
 ### 7.3 Export: decode → retimestamp → encode → mux
@@ -511,6 +511,7 @@ This lets `update` be purely synchronous:
 - if `engine_tx.is_some()` → send command
 - if not ready yet → keep only the newest scrub request (coalescing)
 - guard against delayed engine events by comparing event `t_tl` with the latest requested playhead tick
+- when preview is ready and the playhead is idle, queue one extra same-position `SetPlayhead` to trigger background neighborhood warm-up
 
 ### 8.4 Preview widget (RGBA-first, GPU path later)
 **MVP default**: engine delivers `PreviewFrame { format: Rgba8, bytes }`.

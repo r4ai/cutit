@@ -10,6 +10,8 @@ use tracing::{debug, info};
 
 const PREVIEW_CACHE_CAPACITY: usize = 96;
 pub const DEFAULT_PREVIEW_CACHE_BUCKET_TL: i64 = 33_333;
+const PREFETCH_RADIUS_DIRECTIONAL: i64 = 6;
+const PREFETCH_RADIUS_IDLE: i64 = 12;
 
 /// Commands accepted by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,7 +472,7 @@ where
 
     fn prefetch_neighbors(&mut self, request: &PreviewRequest, direction: ScrubDirection) {
         for offset in prefetch_offsets(direction) {
-            let Some(delta) = self.preview_cache.bucket_size_tl().checked_mul(*offset) else {
+            let Some(delta) = self.preview_cache.bucket_size_tl().checked_mul(offset) else {
                 continue;
             };
             let Some(source_tl) = request.source_tl.checked_add(delta) else {
@@ -515,11 +517,18 @@ where
     }
 }
 
-fn prefetch_offsets(direction: ScrubDirection) -> &'static [i64] {
+fn prefetch_offsets(direction: ScrubDirection) -> Vec<i64> {
     match direction {
-        ScrubDirection::Forward => &[1],
-        ScrubDirection::Backward => &[-1],
-        ScrubDirection::Unknown => &[],
+        ScrubDirection::Forward => (1..=PREFETCH_RADIUS_DIRECTIONAL).collect(),
+        ScrubDirection::Backward => (1..=PREFETCH_RADIUS_DIRECTIONAL).map(|offset| -offset).collect(),
+        ScrubDirection::Unknown => {
+            let mut offsets = Vec::with_capacity((PREFETCH_RADIUS_IDLE * 2) as usize);
+            for step in 1..=PREFETCH_RADIUS_IDLE {
+                offsets.push(step);
+                offsets.push(-step);
+            }
+            offsets
+        }
     }
 }
 
@@ -674,7 +683,7 @@ mod tests {
             .expect("set playhead should succeed");
 
         let calls = calls.lock().expect("lock decode calls");
-        assert_eq!(calls.len(), 3);
+        assert!(calls.len() >= 8);
         assert_eq!(count_close_calls(&calls, 1.5), 1);
         assert_eq!(count_close_calls(&calls, 1.533_333), 1);
         assert!(calls.iter().any(|seconds| *seconds < 1.5));
