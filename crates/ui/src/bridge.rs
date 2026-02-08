@@ -230,6 +230,7 @@ mod tests {
                 video: Some(ProbedVideoStream {
                     stream_index: 0,
                     time_base: Rational::new(1, 90_000).expect("valid rational"),
+                    frame_rate: Some(Rational::new(30_000, 1_001).expect("valid rational")),
                     src_in: 0,
                     src_out: 90_000,
                     width: 160,

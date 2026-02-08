@@ -10,7 +10,8 @@ pub mod time;
 pub mod timeline;
 
 pub use api::{
-    Command, Engine, EngineErrorEvent, EngineErrorKind, Event, ExportSettings, ProjectSnapshot,
+    Command, DEFAULT_PREVIEW_CACHE_BUCKET_TL, Engine, EngineErrorEvent, EngineErrorKind, Event,
+    ExportSettings, ProjectSnapshot,
 };
 pub use error::{EngineError, Result};
 pub use preview::{

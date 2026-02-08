@@ -9,6 +9,8 @@ use iced::{Element, Length, Subscription, Task};
 use crate::bridge::{BridgeEvent, EngineCommandSender, engine_subscription};
 use crate::widgets::{preview, timeline};
 
+const IDLE_WARM_MAX_ROUNDS: u16 = 120;
+
 /// UI messages handled by the iced app update loop.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -36,7 +38,11 @@ pub struct AppState {
     export_path: String,
     playhead_tl: i64,
     pending_playhead_tl: Option<i64>,
+    latest_requested_playhead_tl: Option<i64>,
     playhead_request_in_flight: bool,
+    idle_warm_target_tl: Option<i64>,
+    idle_warm_rounds: u16,
+    loaded_preview_ranges_tl: Vec<(i64, i64)>,
     pending_split_tl: Option<i64>,
     pending_cut_tl: Option<i64>,
     last_split_tl: Option<i64>,
@@ -56,7 +62,11 @@ impl AppState {
                 export_path: String::new(),
                 playhead_tl: 0,
                 pending_playhead_tl: None,
+                latest_requested_playhead_tl: None,
                 playhead_request_in_flight: false,
+                idle_warm_target_tl: None,
+                idle_warm_rounds: 0,
+                loaded_preview_ranges_tl: Vec::new(),
                 pending_split_tl: None,
                 pending_cut_tl: None,
                 last_split_tl: None,
@@ -104,30 +114,30 @@ impl AppState {
                 let clamped = self.clamp_playhead(self.playhead_tl);
                 self.playhead_tl = clamped;
                 self.request_split(clamped);
-                self.queue_playhead(clamped);
+                self.queue_playhead_from_user(clamped);
             }
             Message::CutPressed => {
                 let clamped = self.clamp_playhead(self.playhead_tl);
                 self.playhead_tl = clamped;
                 self.request_cut(clamped);
-                self.queue_playhead(clamped);
+                self.queue_playhead_from_user(clamped);
             }
             Message::TimelineScrubbed(t_tl) => {
                 let clamped = self.clamp_playhead(t_tl);
                 self.playhead_tl = clamped;
-                self.queue_playhead(clamped);
+                self.queue_playhead_from_user(clamped);
             }
             Message::TimelineSplitRequested(at_tl) => {
                 let clamped = self.clamp_playhead(at_tl);
                 self.playhead_tl = clamped;
                 self.request_split(clamped);
-                self.queue_playhead(clamped);
+                self.queue_playhead_from_user(clamped);
             }
             Message::TimelineCutRequested(at_tl) => {
                 let clamped = self.clamp_playhead(at_tl);
                 self.playhead_tl = clamped;
                 self.request_cut(clamped);
-                self.queue_playhead(clamped);
+                self.queue_playhead_from_user(clamped);
             }
             Message::TimelineSegmentMoveRequested {
                 segment_id,
@@ -159,7 +169,11 @@ impl AppState {
                 self.status = String::from("engine event channel closed");
                 self.engine_tx = None;
                 self.pending_playhead_tl = None;
+                self.latest_requested_playhead_tl = None;
                 self.playhead_request_in_flight = false;
+                self.idle_warm_target_tl = None;
+                self.idle_warm_rounds = 0;
+                self.loaded_preview_ranges_tl.clear();
                 self.pending_split_tl = None;
                 self.pending_cut_tl = None;
                 self.last_split_tl = None;
@@ -190,9 +204,22 @@ impl AppState {
         }
     }
 
-    fn queue_playhead(&mut self, t_tl: i64) {
+    fn queue_playhead(&mut self, t_tl: i64, update_latest: bool) {
         self.pending_playhead_tl = Some(t_tl);
+        if update_latest {
+            self.latest_requested_playhead_tl = Some(t_tl);
+        }
         self.flush_playhead_request();
+    }
+
+    fn queue_playhead_from_user(&mut self, t_tl: i64) {
+        self.idle_warm_target_tl = None;
+        self.idle_warm_rounds = 0;
+        self.queue_playhead(t_tl, true);
+    }
+
+    fn queue_playhead_for_idle_warm(&mut self, t_tl: i64) {
+        self.queue_playhead(t_tl, false);
     }
 
     fn request_split(&mut self, at_tl: i64) {
@@ -291,8 +318,12 @@ impl AppState {
                 self.playhead_tl = self.clamp_playhead(self.playhead_tl);
                 self.preview_image = None;
                 self.timeline_cache.clear();
+                self.loaded_preview_ranges_tl.clear();
                 self.pending_playhead_tl = None;
+                self.latest_requested_playhead_tl = None;
                 self.playhead_request_in_flight = false;
+                self.idle_warm_target_tl = None;
+                self.idle_warm_rounds = 0;
                 self.last_split_tl = None;
                 let pending_split_tl = self.pending_split_tl.take();
                 let pending_cut_tl = self.pending_cut_tl.take();
@@ -316,6 +347,7 @@ impl AppState {
                 if !self.is_stale_playhead_event(t_tl) {
                     self.playhead_tl = self.clamp_playhead(t_tl);
                     self.preview_image = preview::PreviewImage::from_frame(&frame);
+                    self.record_loaded_preview_at(self.playhead_tl);
                     self.status = if self.preview_image.is_some() {
                         format!("preview ready at {}", self.playhead_tl)
                     } else {
@@ -326,6 +358,15 @@ impl AppState {
                 }
                 self.playhead_request_in_flight = false;
                 self.flush_playhead_request();
+                if self.preview_image.is_some() && self.should_queue_idle_warm(t_tl) {
+                    if self.idle_warm_target_tl != Some(t_tl) {
+                        self.idle_warm_target_tl = Some(t_tl);
+                        self.idle_warm_rounds = 0;
+                    }
+                    self.idle_warm_rounds = self.idle_warm_rounds.saturating_add(1);
+                    self.record_idle_warm_loaded_hint(t_tl, self.idle_warm_rounds);
+                    self.queue_playhead_for_idle_warm(t_tl);
+                }
             }
             Event::ExportProgress { done, total } => {
                 self.status = format!("exporting {done}/{total}");
@@ -357,10 +398,8 @@ impl AppState {
     }
 
     fn is_stale_playhead_event(&self, event_t_tl: i64) -> bool {
-        match self.pending_playhead_tl {
-            Some(pending_t_tl) => pending_t_tl != event_t_tl,
-            None => false,
-        }
+        self.latest_requested_playhead_tl
+            .is_some_and(|latest_t_tl| latest_t_tl != event_t_tl)
     }
 
     fn is_split_error(&self, kind: &EngineErrorKind) -> bool {
@@ -388,6 +427,85 @@ impl AppState {
         }
     }
 
+    fn record_loaded_preview_at(&mut self, t_tl: i64) {
+        // Record only what is definitively loaded for this event.
+        self.add_loaded_bucket_for_tick(t_tl);
+    }
+
+    fn add_loaded_bucket_for_tick(&mut self, t_tl: i64) {
+        if t_tl < 0 {
+            return;
+        }
+
+        let duration_tl = self.project.as_ref().map(|snapshot| snapshot.duration_tl);
+        let end_tl = match duration_tl {
+            Some(duration_tl) if duration_tl <= 0 => return,
+            Some(duration_tl) => duration_tl,
+            None => t_tl.saturating_add(self.preview_bucket_tl()),
+        };
+        let bucket_tl = self.preview_bucket_tl();
+        let clamped_tl = match duration_tl {
+            Some(duration_tl) => t_tl.clamp(0, duration_tl - 1),
+            None => t_tl,
+        };
+        let bucket_start = clamped_tl.div_euclid(bucket_tl) * bucket_tl;
+        let bucket_end = bucket_start.saturating_add(bucket_tl).min(end_tl);
+        if bucket_end <= bucket_start {
+            return;
+        }
+        self.add_loaded_preview_range(bucket_start, bucket_end);
+    }
+
+    fn add_loaded_preview_range(&mut self, start_tl: i64, end_tl: i64) {
+        if start_tl >= end_tl {
+            return;
+        }
+
+        let ranges = &mut self.loaded_preview_ranges_tl;
+        let mut index = 0;
+        while index < ranges.len() && ranges[index].1 < start_tl {
+            index += 1;
+        }
+
+        if index < ranges.len() && ranges[index].0 <= start_tl && ranges[index].1 >= end_tl {
+            return;
+        }
+
+        let mut merged_start = start_tl;
+        let mut merged_end = end_tl;
+        while index < ranges.len() && ranges[index].0 <= merged_end {
+            merged_start = merged_start.min(ranges[index].0);
+            merged_end = merged_end.max(ranges[index].1);
+            ranges.remove(index);
+        }
+        ranges.insert(index, (merged_start, merged_end));
+        self.timeline_cache.clear();
+    }
+
+    fn preview_bucket_tl(&self) -> i64 {
+        self.project
+            .as_ref()
+            .map(|snapshot| snapshot.preview_bucket_tl)
+            .unwrap_or(engine::DEFAULT_PREVIEW_CACHE_BUCKET_TL)
+    }
+
+    fn record_idle_warm_loaded_hint(&mut self, t_tl: i64, warm_round: u16) {
+        let bucket_tl = self.preview_bucket_tl();
+        let step = i64::from(warm_round.div_ceil(2));
+        let direction = if warm_round % 2 == 1 { 1 } else { -1 };
+        let offset = bucket_tl.saturating_mul(step).saturating_mul(direction);
+        self.add_loaded_bucket_for_tick(t_tl.saturating_add(offset));
+    }
+
+    fn should_queue_idle_warm(&self, t_tl: i64) -> bool {
+        self.project.is_some()
+            && self.latest_requested_playhead_tl == Some(t_tl)
+            && self.pending_playhead_tl.is_none()
+            && !self.playhead_request_in_flight
+            && self.idle_warm_target_tl.is_none_or(|target| target == t_tl)
+            && self.idle_warm_rounds < IDLE_WARM_MAX_ROUNDS
+    }
+
     /// Renders the UI tree.
     pub fn view(&self) -> Element<'_, Message> {
         let import_row = row![
@@ -411,6 +529,7 @@ impl AppState {
             self.project.as_ref(),
             self.playhead_tl,
             self.last_split_tl,
+            &self.loaded_preview_ranges_tl,
             &self.timeline_cache,
             timeline::TimelineActions {
                 on_scrub: Message::TimelineScrubbed,
@@ -469,7 +588,11 @@ impl AppState {
             export_path: String::new(),
             playhead_tl: 0,
             pending_playhead_tl: None,
+            latest_requested_playhead_tl: None,
             playhead_request_in_flight: false,
+            idle_warm_target_tl: None,
+            idle_warm_rounds: 0,
+            loaded_preview_ranges_tl: Vec::new(),
             pending_split_tl: None,
             pending_cut_tl: None,
             last_split_tl: None,
@@ -559,6 +682,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -603,11 +727,14 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
         let _ = app.update(Message::TimelineScrubbed(40));
-        let first = command_rx.recv().expect("first set playhead command");
+        let first = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("first set playhead command");
         assert_eq!(first, Command::SetPlayhead { t_tl: 40 });
 
         let _ = app.update(Message::SplitPressed);
@@ -640,6 +767,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -676,6 +804,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -713,6 +842,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -730,6 +860,216 @@ mod tests {
             .recv_timeout(Duration::from_millis(100))
             .expect("second set playhead command");
         assert_eq!(second, Command::SetPlayhead { t_tl: 80 });
+    }
+
+    #[test]
+    fn stale_preview_frame_ready_event_does_not_override_latest_scrubbed_playhead() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(10));
+        let first = command_rx.recv().expect("first set playhead command");
+        assert_eq!(first, Command::SetPlayhead { t_tl: 10 });
+
+        let _ = app.update(Message::TimelineScrubbed(80));
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PlayheadChanged { t_tl: 10 },
+        )));
+        let second = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second set playhead command");
+        assert_eq!(second, Command::SetPlayhead { t_tl: 80 });
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 10,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 4]),
+                },
+            },
+        )));
+
+        assert_eq!(app.playhead_tl, 80);
+        assert!(app.preview_image.is_none());
+    }
+
+    #[test]
+    fn preview_frame_ready_updates_loaded_ranges_and_project_changed_clears_them() {
+        let (command_tx, _command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 200_000,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 40_000,
+                frame: engine::PreviewFrame {
+                    width: 2,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 8]),
+                },
+            },
+        )));
+
+        assert!(range_contains_tick(&app.loaded_preview_ranges_tl, 40_000));
+        assert!(!range_contains_tick(&app.loaded_preview_ranges_tl, 73_333));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 200_000,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+        assert!(app.loaded_preview_ranges_tl.is_empty());
+    }
+
+    #[test]
+    fn preview_frame_ready_when_idle_queues_additional_playhead_for_progressive_warm_prefetch() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(40));
+        let first = command_rx.recv().expect("first set playhead command");
+        assert_eq!(first, Command::SetPlayhead { t_tl: 40 });
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 40,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 4]),
+                },
+            },
+        )));
+        assert!(app.preview_image.is_some());
+        assert_eq!(app.latest_requested_playhead_tl, Some(40));
+        assert!(app.playhead_request_in_flight);
+        assert!(app.pending_playhead_tl.is_none());
+        assert_eq!(app.idle_warm_target_tl, Some(40));
+
+        let second = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("idle warm set playhead command");
+        assert_eq!(second, Command::SetPlayhead { t_tl: 40 });
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 40,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 4]),
+                },
+            },
+        )));
+        let third = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second idle warm set playhead command");
+        assert_eq!(third, Command::SetPlayhead { t_tl: 40 });
+    }
+
+    #[test]
+    fn scrub_after_idle_warm_in_flight_still_updates_preview() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 200,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(40));
+        let first = command_rx.recv().expect("first set playhead command");
+        assert_eq!(first, Command::SetPlayhead { t_tl: 40 });
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 40,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 4]),
+                },
+            },
+        )));
+        let warm = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("idle warm set playhead command");
+        assert_eq!(warm, Command::SetPlayhead { t_tl: 40 });
+
+        let _ = app.update(Message::TimelineScrubbed(80));
+        assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PlayheadChanged { t_tl: 40 },
+        )));
+        let second = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second set playhead command");
+        assert_eq!(second, Command::SetPlayhead { t_tl: 80 });
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 40,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![0_u8; 4]),
+                },
+            },
+        )));
+        assert_eq!(app.playhead_tl, 80);
+
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PreviewFrameReady {
+                t_tl: 80,
+                frame: engine::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    format: engine::PreviewPixelFormat::Rgba8,
+                    bytes: std::sync::Arc::from(vec![1_u8; 4]),
+                },
+            },
+        )));
+
+        assert_eq!(app.playhead_tl, 80);
+        assert!(app.preview_image.is_some());
     }
 
     #[test]
@@ -784,6 +1124,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -805,6 +1146,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -891,6 +1233,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
         let _ = app.update(Message::TimelineScrubbed(60));
@@ -910,6 +1253,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -924,6 +1268,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -941,6 +1286,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -974,6 +1320,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -986,6 +1333,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
         assert_eq!(app.last_split_tl, Some(30));
@@ -1013,6 +1361,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1040,6 +1389,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
         assert_eq!(app.pending_split_tl, None);
@@ -1055,6 +1405,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1087,6 +1438,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1116,6 +1468,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1128,6 +1481,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
         assert_eq!(app.last_split_tl, Some(30));
@@ -1135,5 +1489,11 @@ mod tests {
         let _ = app.update(Message::Bridge(BridgeEvent::Disconnected));
 
         assert_eq!(app.last_split_tl, None);
+    }
+
+    fn range_contains_tick(ranges: &[(i64, i64)], tick: i64) -> bool {
+        ranges
+            .iter()
+            .any(|(start, end)| *start <= tick && tick < *end)
     }
 }

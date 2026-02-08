@@ -1,10 +1,21 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::cache::PreviewFrameCache;
 use crate::error::{EngineError, Result};
 use crate::export::build_video_export_plan;
 use crate::preview::{FfmpegMediaBackend, MediaBackend, PreviewFrame};
-use crate::project::{Project, normalize_playhead};
-use tracing::info;
+use crate::project::{PreviewRequest, Project, normalize_playhead};
+use crate::time::{TIMELINE_TIME_BASE, rescale};
+use tracing::{debug, info};
+
+const PREVIEW_CACHE_CAPACITY: usize = 96;
+/// Fallback preview-cache bucket size in timeline ticks.
+///
+/// This default is used when stream metadata is insufficient to derive a
+/// source-specific bucket size from frame rate/time base.
+pub const DEFAULT_PREVIEW_CACHE_BUCKET_TL: i64 = 33_333;
+const PREFETCH_RADIUS_IDLE: i64 = 120;
+const PREFETCH_MAX_DECODES_PER_REQUEST: usize = 1;
 
 /// Commands accepted by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +193,7 @@ pub struct ProjectSnapshot {
     pub assets: Vec<MediaAssetSummary>,
     pub segments: Vec<SegmentSummary>,
     pub duration_tl: i64,
+    pub preview_bucket_tl: i64,
 }
 
 /// Snapshot representation of one media asset.
@@ -215,6 +227,21 @@ pub struct Engine<M> {
     playhead_tl: i64,
     next_asset_id: u64,
     next_segment_id: u64,
+    preview_cache: PreviewFrameCache,
+    last_preview: Option<LastPreviewTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LastPreviewTarget {
+    path: PathBuf,
+    source_tl: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrubDirection {
+    Forward,
+    Backward,
+    Unknown,
 }
 
 impl<M> Engine<M>
@@ -236,6 +263,11 @@ where
             playhead_tl: 0,
             next_asset_id: 1,
             next_segment_id: 1,
+            preview_cache: PreviewFrameCache::new(
+                PREVIEW_CACHE_CAPACITY,
+                DEFAULT_PREVIEW_CACHE_BUCKET_TL,
+            ),
+            last_preview: None,
         }
     }
 
@@ -269,9 +301,13 @@ where
         let segment_id = self.allocate_segment_id();
 
         let project = Project::from_single_asset(asset_id, segment_id, probed)?;
-        let snapshot = project.snapshot();
+        let preview_bucket_tl = preview_bucket_tl_for_project(&project);
+        self.preview_cache
+            .reconfigure_bucket_size(preview_bucket_tl);
+        let snapshot = project.snapshot(preview_bucket_tl);
         self.playhead_tl = 0;
         self.project = Some(project);
+        self.invalidate_preview_cache();
 
         Ok(vec![
             Event::ProjectChanged(snapshot),
@@ -291,12 +327,19 @@ where
             Err(error) => return Err(error),
         };
         if let Some(request) = request {
-            let frame = self
-                .media
-                .decode_preview_frame(&request.path, request.source_seconds)?;
+            let direction = self.scrub_direction(&request);
+            let (frame, cache_hit) =
+                self.decode_preview_frame_cached(&request.path, request.source_tl)?;
             events.push(Event::PreviewFrameReady {
                 t_tl: clamped,
                 frame,
+            });
+            if cache_hit && direction == ScrubDirection::Unknown {
+                self.prefetch_neighbors(&request);
+            }
+            self.last_preview = Some(LastPreviewTarget {
+                path: request.path,
+                source_tl: request.source_tl,
             });
         }
 
@@ -322,8 +365,10 @@ where
             segment_count = project.timeline.segments.len(),
             "split applied"
         );
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
+        self.invalidate_preview_cache();
 
-        Ok(vec![Event::ProjectChanged(project.snapshot())])
+        Ok(vec![Event::ProjectChanged(snapshot)])
     }
 
     fn cut(&mut self, at_tl: i64) -> Result<Vec<Event>> {
@@ -340,8 +385,10 @@ where
             playhead_tl = self.playhead_tl,
             "cut applied"
         );
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
+        self.invalidate_preview_cache();
 
-        Ok(vec![Event::ProjectChanged(project.snapshot())])
+        Ok(vec![Event::ProjectChanged(snapshot)])
     }
 
     fn move_segment(&mut self, segment_id: u64, new_start_tl: i64) -> Result<Vec<Event>> {
@@ -351,7 +398,9 @@ where
         }
         let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
         self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
-        Ok(vec![Event::ProjectChanged(project.snapshot())])
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
+        self.invalidate_preview_cache();
+        Ok(vec![Event::ProjectChanged(snapshot)])
     }
 
     fn trim_segment_start(&mut self, segment_id: u64, new_start_tl: i64) -> Result<Vec<Event>> {
@@ -361,7 +410,9 @@ where
         }
         let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
         self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
-        Ok(vec![Event::ProjectChanged(project.snapshot())])
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
+        self.invalidate_preview_cache();
+        Ok(vec![Event::ProjectChanged(snapshot)])
     }
 
     fn trim_segment_end(&mut self, segment_id: u64, new_end_tl: i64) -> Result<Vec<Event>> {
@@ -371,7 +422,9 @@ where
         }
         let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
         self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
-        Ok(vec![Event::ProjectChanged(project.snapshot())])
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
+        self.invalidate_preview_cache();
+        Ok(vec![Event::ProjectChanged(snapshot)])
     }
 
     fn export(&mut self, path: PathBuf, _settings: ExportSettings) -> Result<Vec<Event>> {
@@ -387,6 +440,81 @@ where
         ])
     }
 
+    fn decode_preview_frame_cached(
+        &mut self,
+        path: &Path,
+        source_tl: i64,
+    ) -> Result<(PreviewFrame, bool)> {
+        if let Some(frame) = self.preview_cache.get(path, source_tl) {
+            debug!(source_tl, path = ?path, "preview cache hit");
+            return Ok((frame, true));
+        }
+
+        debug!(source_tl, path = ?path, "preview cache miss");
+        let frame = self
+            .media
+            .decode_preview_frame(path, timeline_ticks_to_seconds(source_tl))?;
+        self.preview_cache.insert(path, source_tl, frame.clone());
+        Ok((frame, false))
+    }
+
+    fn scrub_direction(&self, request: &PreviewRequest) -> ScrubDirection {
+        let Some(previous) = self.last_preview.as_ref() else {
+            return ScrubDirection::Unknown;
+        };
+        if previous.path != request.path {
+            return ScrubDirection::Unknown;
+        }
+        if request.source_tl > previous.source_tl {
+            ScrubDirection::Forward
+        } else if request.source_tl < previous.source_tl {
+            ScrubDirection::Backward
+        } else {
+            ScrubDirection::Unknown
+        }
+    }
+
+    fn prefetch_neighbors(&mut self, request: &PreviewRequest) {
+        let mut decoded = 0usize;
+        for offset in prefetch_offsets() {
+            if decoded >= PREFETCH_MAX_DECODES_PER_REQUEST {
+                break;
+            }
+            let Some(delta) = self.preview_cache.bucket_size_tl().checked_mul(offset) else {
+                continue;
+            };
+            let Some(source_tl) = request.source_tl.checked_add(delta) else {
+                continue;
+            };
+            if source_tl < 0 || self.preview_cache.contains(&request.path, source_tl) {
+                continue;
+            }
+
+            match self
+                .media
+                .decode_preview_frame(&request.path, timeline_ticks_to_seconds(source_tl))
+            {
+                Ok(frame) => {
+                    self.preview_cache.insert(&request.path, source_tl, frame);
+                    decoded += 1;
+                }
+                Err(error) => {
+                    debug!(
+                        source_tl,
+                        path = ?request.path,
+                        %error,
+                        "prefetch decode failed"
+                    );
+                }
+            }
+        }
+    }
+
+    fn invalidate_preview_cache(&mut self) {
+        self.preview_cache.clear();
+        self.last_preview = None;
+    }
+
     fn allocate_asset_id(&mut self) -> u64 {
         let id = self.next_asset_id;
         self.next_asset_id += 1;
@@ -398,6 +526,46 @@ where
         self.next_segment_id += 1;
         id
     }
+}
+
+fn prefetch_offsets() -> Vec<i64> {
+    let mut offsets = Vec::with_capacity((PREFETCH_RADIUS_IDLE * 2) as usize);
+    for step in 1..=PREFETCH_RADIUS_IDLE {
+        offsets.push(step);
+        offsets.push(-step);
+    }
+    offsets
+}
+
+fn timeline_ticks_to_seconds(t_tl: i64) -> f64 {
+    t_tl as f64 / TIMELINE_TIME_BASE.den as f64
+}
+
+fn preview_bucket_tl_for_project(project: &Project) -> i64 {
+    let mut derived = None;
+
+    for asset in &project.assets {
+        let Some(video) = asset.video else {
+            continue;
+        };
+
+        let bucket_tl = if let Some(frame_rate) = video.frame_rate {
+            frame_duration_tl_from_frame_rate(frame_rate)
+        } else {
+            rescale(1, video.time_base, TIMELINE_TIME_BASE).abs().max(1)
+        };
+
+        derived = Some(derived.map_or(bucket_tl, |current: i64| current.min(bucket_tl)));
+    }
+
+    derived.unwrap_or(DEFAULT_PREVIEW_CACHE_BUCKET_TL)
+}
+
+fn frame_duration_tl_from_frame_rate(frame_rate: crate::time::Rational) -> i64 {
+    let numerator = i128::from(TIMELINE_TIME_BASE.den) * i128::from(frame_rate.den);
+    let denominator = i128::from(frame_rate.num.max(1));
+    let rounded = (numerator + denominator / 2) / denominator;
+    rounded.max(1).min(i128::from(i64::MAX)) as i64
 }
 
 impl Engine<FfmpegMediaBackend> {
@@ -439,6 +607,7 @@ mod tests {
         assert_eq!(snapshot.assets.len(), 1);
         assert_eq!(snapshot.segments.len(), 1);
         assert_eq!(snapshot.duration_tl, 1_200_000);
+        assert_eq!(snapshot.preview_bucket_tl, 33_367);
 
         let segment = &snapshot.segments[0];
         assert_eq!(segment.timeline_start, 0);
@@ -475,6 +644,102 @@ mod tests {
 
         let decoded_seconds = calls.lock().expect("lock decode calls")[0];
         assert!((decoded_seconds - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn set_playhead_on_cache_miss_decodes_only_requested_frame() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let calls = backend.decode_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
+
+        let calls = calls.lock().expect("lock decode calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(count_close_calls(&calls, 1.5), 1);
+    }
+
+    #[test]
+    fn set_playhead_on_cache_hit_does_not_prefetch_directional_neighbors() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let calls = backend.decode_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 533_333 })
+            .expect("set playhead should succeed");
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
+
+        let calls = calls.lock().expect("lock decode calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(count_close_calls(&calls, 1.5), 1);
+        assert_eq!(count_close_calls(&calls, 1.533_333), 1);
+    }
+
+    #[test]
+    fn set_playhead_on_cache_hit_prefetches_when_idle_direction_is_unknown() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let calls = backend.decode_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("second set playhead should succeed");
+
+        let calls = calls.lock().expect("lock decode calls");
+        assert_eq!(count_close_calls(&calls, 1.5), 1);
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().any(|seconds| (*seconds - 1.5).abs() > 1e-6));
+    }
+
+    #[test]
+    fn edit_commands_invalidate_preview_cache() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let calls = backend.decode_calls();
+        let mut engine = Engine::new(backend);
+        engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
+
+        engine
+            .handle_command(Command::Split { at_tl: 333_333 })
+            .expect("split should succeed");
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
+
+        let calls = calls.lock().expect("lock decode calls");
+        assert_eq!(count_close_calls(&calls, 1.5), 2);
     }
 
     #[test]
@@ -1012,6 +1277,7 @@ mod tests {
             video: Some(ProbedVideoStream {
                 stream_index: 0,
                 time_base: video_tb,
+                frame_rate: Some(Rational::new(30_000, 1_001).expect("valid rational")),
                 src_in: video_src_in,
                 src_out: video_src_out,
                 width: 160,
@@ -1097,5 +1363,12 @@ mod tests {
                 .push(plan.clone());
             Ok(())
         }
+    }
+
+    fn count_close_calls(values: &[f64], target: f64) -> usize {
+        values
+            .iter()
+            .filter(|value| (*value - target).abs() < 1e-6)
+            .count()
     }
 }
