@@ -210,7 +210,14 @@ impl<Message> canvas::Program<Message> for TimelineProgram<'_, Message> {
                 let Some(drag_mode) = state.drag_mode.take() else {
                     return (canvas::event::Status::Ignored, None);
                 };
-                let x = cursor_x.unwrap_or(0.0);
+                if !cursor.is_over(bounds) {
+                    state.drag_start_x = None;
+                    return (canvas::event::Status::Captured, None);
+                }
+                let Some(x) = cursor_x else {
+                    state.drag_start_x = None;
+                    return (canvas::event::Status::Captured, None);
+                };
                 let tick = tick_from_x(x, bounds.width, self.duration_tl);
                 let drag_distance = state
                     .drag_start_x
@@ -791,6 +798,49 @@ mod tests {
     }
 
     #[test]
+    fn drag_segment_body_release_outside_timeline_cancels_move() {
+        let cache = iced::widget::canvas::Cache::new();
+        let segments = vec![sample_segment(7, 20, 40)];
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &segments,
+            cache: &cache,
+            on_scrub: |_| -1,
+            on_split: |_| -2,
+            on_cut: |_| -3,
+            on_move: |segment_id, start_tl| segment_id as i64 * 1_000 + start_tl,
+            on_trim_start: |_, _| -4,
+            on_trim_end: |_, _| -5,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (_, pressed) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(30.0, 20.0)),
+        );
+        assert_eq!(pressed, None);
+
+        let (status, released) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(120.0, 20.0)),
+        );
+        assert_eq!(status, canvas::event::Status::Captured);
+        assert_eq!(released, None);
+    }
+
+    #[test]
     fn click_segment_body_dispatches_scrub_instead_of_move() {
         let cache = iced::widget::canvas::Cache::new();
         let segments = vec![sample_segment(7, 20, 40)];
@@ -1022,6 +1072,49 @@ mod tests {
         );
         assert_eq!(status, canvas::event::Status::Captured);
         assert_eq!(released, Some(7_025));
+    }
+
+    #[test]
+    fn drag_segment_start_edge_release_outside_timeline_cancels_trim() {
+        let cache = iced::widget::canvas::Cache::new();
+        let segments = vec![sample_segment(7, 20, 40)];
+        let program = TimelineProgram {
+            duration_tl: 100,
+            playhead_tl: 0,
+            split_feedback_tl: None,
+            segments: &segments,
+            cache: &cache,
+            on_scrub: |_| -1,
+            on_split: |_| -2,
+            on_cut: |_| -3,
+            on_move: |_, _| -4,
+            on_trim_start: |segment_id, start_tl| segment_id as i64 * 1_000 + start_tl,
+            on_trim_end: |_, _| -5,
+        };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let mut state = TimelineState::default();
+
+        let (_, pressed) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(20.0, 20.0)),
+        );
+        assert_eq!(pressed, None);
+
+        let (status, released) = program.update(
+            &mut state,
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(120.0, 20.0)),
+        );
+        assert_eq!(status, canvas::event::Status::Captured);
+        assert_eq!(released, None);
     }
 
     #[test]

@@ -295,7 +295,7 @@ impl Project {
             0
         } else {
             let prev = &self.timeline.segments[index - 1];
-            prev.timeline_start + prev.timeline_duration
+            prev.timeline_start.saturating_add(prev.timeline_duration)
         };
         let duration = self.timeline.segments[index].timeline_duration;
         let max_start = if index + 1 < self.timeline.segments.len() {
@@ -303,7 +303,7 @@ impl Project {
                 .timeline_start
                 .saturating_sub(duration)
         } else {
-            i64::MAX
+            i64::MAX.saturating_sub(duration.max(0))
         };
         let clamped = new_start_tl.max(0).clamp(prev_end, max_start.max(prev_end));
         self.timeline.segments[index].timeline_start = clamped;
@@ -474,7 +474,8 @@ fn shift_stream_point(
         return point;
     };
     let delta_stream = rescale(delta_tl, TIMELINE_TIME_BASE, time_base);
-    Some(point.saturating_add(delta_stream))
+    let shifted = point.saturating_add(delta_stream);
+    Some(shifted.max(0))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -641,6 +642,41 @@ mod tests {
     #[test]
     fn normalize_playhead_returns_zero_for_empty_project_duration() {
         assert_eq!(normalize_playhead(10, 0), 0);
+    }
+
+    #[test]
+    fn move_segment_clamps_last_segment_to_prevent_timeline_overflow() {
+        let mut project = sample_project();
+        let duration = project.timeline.segments[0].timeline_duration;
+
+        project
+            .move_segment(1, i64::MAX)
+            .expect("move should succeed");
+
+        let moved = &project.timeline.segments[0];
+        assert_eq!(moved.timeline_start, i64::MAX - duration);
+        assert_eq!(project.timeline.duration_tl(), i64::MAX);
+    }
+
+    #[test]
+    fn trim_segment_start_clamps_shifted_stream_points_to_zero() {
+        let mut project = sample_project();
+        let segment = &mut project.timeline.segments[0];
+        segment.timeline_start = 100;
+        segment.src_in_video = Some(5);
+        segment.src_out_video = Some(50);
+        segment.src_in_audio = Some(3);
+        segment.src_out_audio = Some(30);
+
+        project
+            .trim_segment_start(1, 0)
+            .expect("trim start should succeed");
+
+        let trimmed = &project.timeline.segments[0];
+        assert_eq!(trimmed.src_in_video, Some(0));
+        assert_eq!(trimmed.src_out_video, Some(50));
+        assert_eq!(trimmed.src_in_audio, Some(0));
+        assert_eq!(trimmed.src_out_audio, Some(30));
     }
 
     #[test]

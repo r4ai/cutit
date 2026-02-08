@@ -47,14 +47,74 @@ pub enum Command {
     Cut {
         at_tl: i64,
     },
+    /// Moves one segment to `new_start_tl` in timeline ticks.
+    ///
+    /// The engine clamps `new_start_tl` so the moved segment does not overlap
+    /// adjacent segments and timeline arithmetic remains valid. Returns
+    /// `SegmentIdNotFound` if `segment_id` does not exist.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use std::path::PathBuf;
+    /// use engine::{Command, Engine, FfmpegMediaBackend};
+    ///
+    /// let mut engine = Engine::new(FfmpegMediaBackend);
+    /// let _ = engine.handle_command(Command::Import {
+    ///     path: PathBuf::from("demo.mp4"),
+    /// });
+    /// let _ = engine.handle_command(Command::MoveSegment {
+    ///     segment_id: 7,
+    ///     new_start_tl: 900_000,
+    /// });
+    /// ```
     MoveSegment {
         segment_id: u64,
         new_start_tl: i64,
     },
+    /// Trims one segment start to `new_start_tl` in timeline ticks.
+    ///
+    /// `new_start_tl` is interpreted as the desired inclusive timeline start.
+    /// The engine clamps it to preserve segment ordering and keep at least one
+    /// timeline tick of duration. Returns `SegmentIdNotFound` when missing.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use std::path::PathBuf;
+    /// use engine::{Command, Engine, FfmpegMediaBackend};
+    ///
+    /// let mut engine = Engine::new(FfmpegMediaBackend);
+    /// let _ = engine.handle_command(Command::Import {
+    ///     path: PathBuf::from("demo.mp4"),
+    /// });
+    /// let _ = engine.handle_command(Command::TrimSegmentStart {
+    ///     segment_id: 7,
+    ///     new_start_tl: 400_000,
+    /// });
+    /// ```
     TrimSegmentStart {
         segment_id: u64,
         new_start_tl: i64,
     },
+    /// Trims one segment end to `new_end_tl` in timeline ticks.
+    ///
+    /// `new_end_tl` is an exclusive timeline boundary. The engine clamps it to
+    /// preserve ordering and keep at least one timeline tick of duration.
+    /// Returns `SegmentIdNotFound` when `segment_id` does not exist.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use std::path::PathBuf;
+    /// use engine::{Command, Engine, FfmpegMediaBackend};
+    ///
+    /// let mut engine = Engine::new(FfmpegMediaBackend);
+    /// let _ = engine.handle_command(Command::Import {
+    ///     path: PathBuf::from("demo.mp4"),
+    /// });
+    /// let _ = engine.handle_command(Command::TrimSegmentEnd {
+    ///     segment_id: 7,
+    ///     new_end_tl: 800_000,
+    /// });
+    /// ```
     TrimSegmentEnd {
         segment_id: u64,
         new_end_tl: i64,

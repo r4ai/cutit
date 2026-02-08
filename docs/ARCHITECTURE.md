@@ -215,8 +215,8 @@ pub struct Segment {
 ```
 
 Invariant (MVP):
-- `segments` are contiguous (no gaps) unless explicitly allowed.
-- Cuts remove the segment starting at `at_tl`, or the segment containing `at_tl` when not on a boundary.
+- `segments` are contiguous (no gaps) by default.
+- `Cut(at_tl)` is an explicit exception: it removes one segment and preserves following segment start times (no ripple/compaction), so gaps can remain.
 - `timeline_duration` is authoritative; it determines export length.
 
 ### 4.4 Editing operations (MVP)
@@ -224,6 +224,9 @@ Invariant (MVP):
   - find segment containing `at_tl`
   - compute `src_at` for video/audio by mapping `at_tl` into source time bases
   - replace with two segments, adjusting `src_in/out` and `timeline_duration`
+- `Cut(at_tl)`:
+  - remove the segment starting at `at_tl`, or the segment containing `at_tl` when not on a boundary
+  - keep following segment starts unchanged (gaps are preserved)
 - `RippleDelete(range_tl)` (optional):
   - remove portions, shift later segments left to close gaps
 
