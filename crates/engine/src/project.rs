@@ -50,6 +50,8 @@ pub struct MediaAsset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoStreamInfo {
     pub time_base: crate::time::Rational,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<crate::time::Rational>,
     pub width: u32,
     pub height: u32,
 }
@@ -67,7 +69,6 @@ pub struct AudioStreamInfo {
 pub struct PreviewRequest {
     pub path: PathBuf,
     pub source_tl: i64,
-    pub source_seconds: f64,
 }
 
 impl Project {
@@ -175,7 +176,7 @@ impl Project {
     }
 
     /// Creates an immutable snapshot for the UI.
-    pub fn snapshot(&self) -> ProjectSnapshot {
+    pub fn snapshot(&self, preview_bucket_tl: i64) -> ProjectSnapshot {
         ProjectSnapshot {
             assets: self
                 .assets
@@ -204,6 +205,7 @@ impl Project {
                 })
                 .collect(),
             duration_tl: self.duration_tl(),
+            preview_bucket_tl,
         }
     }
 
@@ -227,12 +229,10 @@ impl Project {
             src_in_video + rescale(local_tl, TIMELINE_TIME_BASE, video.time_base);
         let src_target_tl = rescale(src_target_video_ts, video.time_base, TIMELINE_TIME_BASE);
         let source_tl = src_target_tl.max(0);
-        let source_seconds = source_tl as f64 / TIMELINE_TIME_BASE.den as f64;
 
         Ok(PreviewRequest {
             path: asset.path.clone(),
             source_tl,
-            source_seconds,
         })
     }
 
@@ -561,6 +561,7 @@ impl From<ProbedVideoStream> for VideoStreamInfo {
     fn from(value: ProbedVideoStream) -> Self {
         Self {
             time_base: value.time_base,
+            frame_rate: value.frame_rate,
             width: value.width,
             height: value.height,
         }
@@ -807,6 +808,7 @@ mod tests {
                 audio_stream_index: Some(7),
                 video: Some(VideoStreamInfo {
                     time_base: Rational::new(1, 90_000).expect("valid rational"),
+                    frame_rate: Some(Rational::new(30_000, 1_001).expect("valid rational")),
                     width: 1920,
                     height: 1080,
                 }),

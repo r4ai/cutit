@@ -9,8 +9,6 @@ use iced::{Element, Length, Subscription, Task};
 use crate::bridge::{BridgeEvent, EngineCommandSender, engine_subscription};
 use crate::widgets::{preview, timeline};
 
-const PREVIEW_CACHE_BUCKET_TL: i64 = 33_333;
-
 /// UI messages handled by the iced app update loop.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -403,6 +401,7 @@ impl AppState {
     }
 
     fn record_loaded_preview_at(&mut self, t_tl: i64) {
+        let bucket_tl = self.preview_bucket_tl();
         let direction = match self.last_preview_ready_tl {
             Some(previous_t_tl) if t_tl > previous_t_tl => 1,
             Some(previous_t_tl) if t_tl < previous_t_tl => -1,
@@ -412,11 +411,11 @@ impl AppState {
 
         self.add_loaded_bucket_for_tick(t_tl);
         match direction {
-            1 => self.add_loaded_bucket_for_tick(t_tl + PREVIEW_CACHE_BUCKET_TL),
-            -1 => self.add_loaded_bucket_for_tick(t_tl - PREVIEW_CACHE_BUCKET_TL),
+            1 => self.add_loaded_bucket_for_tick(t_tl + bucket_tl),
+            -1 => self.add_loaded_bucket_for_tick(t_tl - bucket_tl),
             _ => {
-                self.add_loaded_bucket_for_tick(t_tl - PREVIEW_CACHE_BUCKET_TL);
-                self.add_loaded_bucket_for_tick(t_tl + PREVIEW_CACHE_BUCKET_TL);
+                self.add_loaded_bucket_for_tick(t_tl - bucket_tl);
+                self.add_loaded_bucket_for_tick(t_tl + bucket_tl);
             }
         }
     }
@@ -430,16 +429,15 @@ impl AppState {
         let end_tl = match duration_tl {
             Some(duration_tl) if duration_tl <= 0 => return,
             Some(duration_tl) => duration_tl,
-            None => t_tl.saturating_add(PREVIEW_CACHE_BUCKET_TL),
+            None => t_tl.saturating_add(self.preview_bucket_tl()),
         };
+        let bucket_tl = self.preview_bucket_tl();
         let clamped_tl = match duration_tl {
             Some(duration_tl) => t_tl.clamp(0, duration_tl - 1),
             None => t_tl,
         };
-        let bucket_start = clamped_tl.div_euclid(PREVIEW_CACHE_BUCKET_TL) * PREVIEW_CACHE_BUCKET_TL;
-        let bucket_end = bucket_start
-            .saturating_add(PREVIEW_CACHE_BUCKET_TL)
-            .min(end_tl);
+        let bucket_start = clamped_tl.div_euclid(bucket_tl) * bucket_tl;
+        let bucket_end = bucket_start.saturating_add(bucket_tl).min(end_tl);
         if bucket_end <= bucket_start {
             return;
         }
@@ -447,24 +445,36 @@ impl AppState {
     }
 
     fn add_loaded_preview_range(&mut self, start_tl: i64, end_tl: i64) {
-        let mut ranges = self.loaded_preview_ranges_tl.clone();
-        ranges.push((start_tl, end_tl));
-        ranges.sort_by_key(|(start, _)| *start);
-
-        let mut merged = Vec::with_capacity(ranges.len());
-        for (start, end) in ranges {
-            match merged.last_mut() {
-                Some((_, merged_end)) if start <= *merged_end => {
-                    *merged_end = (*merged_end).max(end);
-                }
-                _ => merged.push((start, end)),
-            }
+        if start_tl >= end_tl {
+            return;
         }
 
-        if merged != self.loaded_preview_ranges_tl {
-            self.loaded_preview_ranges_tl = merged;
-            self.timeline_cache.clear();
+        let ranges = &mut self.loaded_preview_ranges_tl;
+        let mut index = 0;
+        while index < ranges.len() && ranges[index].1 < start_tl {
+            index += 1;
         }
+
+        if index < ranges.len() && ranges[index].0 <= start_tl && ranges[index].1 >= end_tl {
+            return;
+        }
+
+        let mut merged_start = start_tl;
+        let mut merged_end = end_tl;
+        while index < ranges.len() && ranges[index].0 <= merged_end {
+            merged_start = merged_start.min(ranges[index].0);
+            merged_end = merged_end.max(ranges[index].1);
+            ranges.remove(index);
+        }
+        ranges.insert(index, (merged_start, merged_end));
+        self.timeline_cache.clear();
+    }
+
+    fn preview_bucket_tl(&self) -> i64 {
+        self.project
+            .as_ref()
+            .map(|snapshot| snapshot.preview_bucket_tl)
+            .unwrap_or(engine::DEFAULT_PREVIEW_CACHE_BUCKET_TL)
     }
 
     /// Renders the UI tree.
@@ -642,6 +652,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -686,6 +697,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -723,6 +735,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -759,6 +772,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -796,6 +810,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -824,6 +839,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -865,6 +881,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 200_000,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -888,6 +905,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 200_000,
+                preview_bucket_tl: 33_333,
             },
         ))));
         assert!(app.loaded_preview_ranges_tl.is_empty());
@@ -945,6 +963,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -966,6 +985,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1052,6 +1072,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
         let _ = app.update(Message::TimelineScrubbed(60));
@@ -1071,6 +1092,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1085,6 +1107,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1102,6 +1125,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1135,6 +1159,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1147,6 +1172,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
         assert_eq!(app.last_split_tl, Some(30));
@@ -1174,6 +1200,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1201,6 +1228,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
         assert_eq!(app.pending_split_tl, None);
@@ -1216,6 +1244,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1248,6 +1277,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1277,6 +1307,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
 
@@ -1289,6 +1320,7 @@ mod tests {
                 assets: vec![],
                 segments: vec![],
                 duration_tl: 100,
+                preview_bucket_tl: 33_333,
             },
         ))));
         assert_eq!(app.last_split_tl, Some(30));

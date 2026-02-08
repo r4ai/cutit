@@ -5,10 +5,11 @@ use crate::error::{EngineError, Result};
 use crate::export::build_video_export_plan;
 use crate::preview::{FfmpegMediaBackend, MediaBackend, PreviewFrame};
 use crate::project::{PreviewRequest, Project, normalize_playhead};
+use crate::time::{TIMELINE_TIME_BASE, rescale};
 use tracing::{debug, info};
 
 const PREVIEW_CACHE_CAPACITY: usize = 96;
-const PREVIEW_CACHE_BUCKET_TL: i64 = 33_333;
+pub const DEFAULT_PREVIEW_CACHE_BUCKET_TL: i64 = 33_333;
 
 /// Commands accepted by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +187,7 @@ pub struct ProjectSnapshot {
     pub assets: Vec<MediaAssetSummary>,
     pub segments: Vec<SegmentSummary>,
     pub duration_tl: i64,
+    pub preview_bucket_tl: i64,
 }
 
 /// Snapshot representation of one media asset.
@@ -255,7 +257,10 @@ where
             playhead_tl: 0,
             next_asset_id: 1,
             next_segment_id: 1,
-            preview_cache: PreviewFrameCache::new(PREVIEW_CACHE_CAPACITY, PREVIEW_CACHE_BUCKET_TL),
+            preview_cache: PreviewFrameCache::new(
+                PREVIEW_CACHE_CAPACITY,
+                DEFAULT_PREVIEW_CACHE_BUCKET_TL,
+            ),
             last_preview: None,
         }
     }
@@ -290,7 +295,10 @@ where
         let segment_id = self.allocate_segment_id();
 
         let project = Project::from_single_asset(asset_id, segment_id, probed)?;
-        let snapshot = project.snapshot();
+        let preview_bucket_tl = preview_bucket_tl_for_project(&project);
+        self.preview_cache
+            .reconfigure_bucket_size(preview_bucket_tl);
+        let snapshot = project.snapshot(preview_bucket_tl);
         self.playhead_tl = 0;
         self.project = Some(project);
         self.invalidate_preview_cache();
@@ -314,12 +322,15 @@ where
         };
         if let Some(request) = request {
             let direction = self.scrub_direction(&request);
-            let frame = self.decode_preview_frame_cached(&request.path, request.source_tl)?;
+            let (frame, cache_hit) =
+                self.decode_preview_frame_cached(&request.path, request.source_tl)?;
             events.push(Event::PreviewFrameReady {
                 t_tl: clamped,
                 frame,
             });
-            self.prefetch_neighbors(&request, direction);
+            if cache_hit {
+                self.prefetch_neighbors(&request, direction);
+            }
             self.last_preview = Some(LastPreviewTarget {
                 path: request.path,
                 source_tl: request.source_tl,
@@ -348,7 +359,7 @@ where
             segment_count = project.timeline.segments.len(),
             "split applied"
         );
-        let snapshot = project.snapshot();
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
         self.invalidate_preview_cache();
 
         Ok(vec![Event::ProjectChanged(snapshot)])
@@ -368,7 +379,7 @@ where
             playhead_tl = self.playhead_tl,
             "cut applied"
         );
-        let snapshot = project.snapshot();
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
         self.invalidate_preview_cache();
 
         Ok(vec![Event::ProjectChanged(snapshot)])
@@ -381,7 +392,7 @@ where
         }
         let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
         self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
-        let snapshot = project.snapshot();
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
         self.invalidate_preview_cache();
         Ok(vec![Event::ProjectChanged(snapshot)])
     }
@@ -393,7 +404,7 @@ where
         }
         let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
         self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
-        let snapshot = project.snapshot();
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
         self.invalidate_preview_cache();
         Ok(vec![Event::ProjectChanged(snapshot)])
     }
@@ -405,7 +416,7 @@ where
         }
         let project = self.project.as_ref().ok_or(EngineError::ProjectNotLoaded)?;
         self.playhead_tl = normalize_playhead(self.playhead_tl, project.duration_tl());
-        let snapshot = project.snapshot();
+        let snapshot = project.snapshot(self.preview_cache.bucket_size_tl());
         self.invalidate_preview_cache();
         Ok(vec![Event::ProjectChanged(snapshot)])
     }
@@ -423,10 +434,14 @@ where
         ])
     }
 
-    fn decode_preview_frame_cached(&mut self, path: &Path, source_tl: i64) -> Result<PreviewFrame> {
+    fn decode_preview_frame_cached(
+        &mut self,
+        path: &Path,
+        source_tl: i64,
+    ) -> Result<(PreviewFrame, bool)> {
         if let Some(frame) = self.preview_cache.get(path, source_tl) {
             debug!(source_tl, path = ?path, "preview cache hit");
-            return Ok(frame);
+            return Ok((frame, true));
         }
 
         debug!(source_tl, path = ?path, "preview cache miss");
@@ -434,7 +449,7 @@ where
             .media
             .decode_preview_frame(path, timeline_ticks_to_seconds(source_tl))?;
         self.preview_cache.insert(path, source_tl, frame.clone());
-        Ok(frame)
+        Ok((frame, false))
     }
 
     fn scrub_direction(&self, request: &PreviewRequest) -> ScrubDirection {
@@ -504,12 +519,39 @@ fn prefetch_offsets(direction: ScrubDirection) -> &'static [i64] {
     match direction {
         ScrubDirection::Forward => &[1],
         ScrubDirection::Backward => &[-1],
-        ScrubDirection::Unknown => &[1, -1],
+        ScrubDirection::Unknown => &[],
     }
 }
 
 fn timeline_ticks_to_seconds(t_tl: i64) -> f64 {
-    t_tl as f64 / 1_000_000.0
+    t_tl as f64 / TIMELINE_TIME_BASE.den as f64
+}
+
+fn preview_bucket_tl_for_project(project: &Project) -> i64 {
+    let mut derived = None;
+
+    for asset in &project.assets {
+        let Some(video) = asset.video else {
+            continue;
+        };
+
+        let bucket_tl = if let Some(frame_rate) = video.frame_rate {
+            frame_duration_tl_from_frame_rate(frame_rate)
+        } else {
+            rescale(1, video.time_base, TIMELINE_TIME_BASE).abs().max(1)
+        };
+
+        derived = Some(derived.map_or(bucket_tl, |current: i64| current.min(bucket_tl)));
+    }
+
+    derived.unwrap_or(DEFAULT_PREVIEW_CACHE_BUCKET_TL)
+}
+
+fn frame_duration_tl_from_frame_rate(frame_rate: crate::time::Rational) -> i64 {
+    let numerator = i128::from(TIMELINE_TIME_BASE.den) * i128::from(frame_rate.den);
+    let denominator = i128::from(frame_rate.num.max(1));
+    let rounded = (numerator + denominator / 2) / denominator;
+    rounded.max(1).min(i128::from(i64::MAX)) as i64
 }
 
 impl Engine<FfmpegMediaBackend> {
@@ -551,6 +593,7 @@ mod tests {
         assert_eq!(snapshot.assets.len(), 1);
         assert_eq!(snapshot.segments.len(), 1);
         assert_eq!(snapshot.duration_tl, 1_200_000);
+        assert_eq!(snapshot.preview_bucket_tl, 33_367);
 
         let segment = &snapshot.segments[0];
         assert_eq!(segment.timeline_start, 0);
@@ -590,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn set_playhead_prefetches_neighbor_preview_frames_into_ram_cache() {
+    fn set_playhead_on_cache_miss_decodes_only_requested_frame() {
         let backend = MockBackend::new(sample_probed_media(), sample_frame());
         let calls = backend.decode_calls();
         let mut engine = Engine::new(backend);
@@ -605,14 +648,12 @@ mod tests {
             .expect("set playhead should succeed");
 
         let calls = calls.lock().expect("lock decode calls");
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 1);
         assert_eq!(count_close_calls(&calls, 1.5), 1);
-        assert_eq!(count_close_calls(&calls, 1.533_333), 1);
-        assert_eq!(count_close_calls(&calls, 1.466_667), 1);
     }
 
     #[test]
-    fn set_playhead_reuses_prefetched_neighbor_frame_without_redecode() {
+    fn set_playhead_on_cache_hit_prefetches_directional_neighbor() {
         let backend = MockBackend::new(sample_probed_media(), sample_frame());
         let calls = backend.decode_calls();
         let mut engine = Engine::new(backend);
@@ -628,9 +669,15 @@ mod tests {
         engine
             .handle_command(Command::SetPlayhead { t_tl: 533_333 })
             .expect("set playhead should succeed");
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("set playhead should succeed");
 
         let calls = calls.lock().expect("lock decode calls");
+        assert_eq!(calls.len(), 3);
+        assert_eq!(count_close_calls(&calls, 1.5), 1);
         assert_eq!(count_close_calls(&calls, 1.533_333), 1);
+        assert!(calls.iter().any(|seconds| *seconds < 1.5));
     }
 
     #[test]
@@ -1193,6 +1240,7 @@ mod tests {
             video: Some(ProbedVideoStream {
                 stream_index: 0,
                 time_base: video_tb,
+                frame_rate: Some(Rational::new(30_000, 1_001).expect("valid rational")),
                 src_in: video_src_in,
                 src_out: video_src_out,
                 width: 160,

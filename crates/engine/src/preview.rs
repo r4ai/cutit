@@ -36,6 +36,7 @@ pub struct ProbedMedia {
 pub struct ProbedVideoStream {
     pub stream_index: u32,
     pub time_base: Rational,
+    pub frame_rate: Option<Rational>,
     pub src_in: i64,
     pub src_out: i64,
     pub width: u32,
@@ -87,6 +88,7 @@ impl MediaBackend for FfmpegMediaBackend {
                 Ok(ProbedVideoStream {
                     stream_index: stream.index,
                     time_base: stream.time_base.into(),
+                    frame_rate: stream.r_frame_rate.map(Into::into),
                     src_in,
                     src_out,
                     width: stream

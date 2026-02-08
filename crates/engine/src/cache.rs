@@ -69,6 +69,19 @@ impl PreviewFrameCache {
         self.bucket_size_tl
     }
 
+    /// Reconfigures cache bucket size and clears existing entries.
+    pub fn reconfigure_bucket_size(&mut self, bucket_size_tl: i64) {
+        assert!(
+            bucket_size_tl > 0,
+            "preview cache bucket size must be positive"
+        );
+        if self.bucket_size_tl == bucket_size_tl {
+            return;
+        }
+        self.bucket_size_tl = bucket_size_tl;
+        self.clear();
+    }
+
     /// Returns true when a frame for the same key bucket already exists.
     pub fn contains(&self, path: impl AsRef<Path>, source_tl: i64) -> bool {
         let key = self.make_key(path.as_ref(), source_tl);
@@ -148,6 +161,17 @@ mod tests {
         assert!(cache.get("demo.mp4", 1_000_000).is_some());
         assert!(cache.get("demo.mp4", 2_000_000).is_none());
         assert!(cache.get("demo.mp4", 3_000_000).is_some());
+    }
+
+    #[test]
+    fn reconfigure_bucket_size_clears_existing_entries() {
+        let mut cache = PreviewFrameCache::new(8, 33_333);
+        cache.insert("demo.mp4", 1_500_000, sample_frame(10));
+
+        cache.reconfigure_bucket_size(16_667);
+
+        assert!(cache.get("demo.mp4", 1_500_000).is_none());
+        assert_eq!(cache.bucket_size_tl(), 16_667);
     }
 
     fn sample_frame(value: u8) -> crate::preview::PreviewFrame {
