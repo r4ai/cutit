@@ -1022,7 +1022,10 @@ mod tests {
             },
         ))));
 
-        assert_eq!(app.status, "split failed at 42: media backend error: decode failed");
+        assert_eq!(
+            app.status,
+            "split failed at 42: media backend error: decode failed"
+        );
         assert_eq!(app.pending_split_tl, None);
         assert_eq!(app.last_split_tl, None);
 
