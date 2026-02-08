@@ -306,10 +306,11 @@ impl AppState {
                 }
             }
             Event::PlayheadChanged { t_tl } => {
-                if self.is_stale_playhead_event(t_tl) {
-                    return;
+                if !self.is_stale_playhead_event(t_tl) {
+                    self.playhead_tl = self.clamp_playhead(t_tl);
                 }
-                self.playhead_tl = self.clamp_playhead(t_tl);
+                self.playhead_request_in_flight = false;
+                self.flush_playhead_request();
             }
             Event::PreviewFrameReady { t_tl, frame } => {
                 if !self.is_stale_playhead_event(t_tl) {
@@ -724,6 +725,11 @@ mod tests {
         )));
 
         assert_eq!(app.playhead_tl, 80);
+
+        let second = command_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second set playhead command");
+        assert_eq!(second, Command::SetPlayhead { t_tl: 80 });
     }
 
     #[test]

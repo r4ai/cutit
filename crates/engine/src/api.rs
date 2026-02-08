@@ -150,7 +150,7 @@ impl From<&EngineError> for EngineErrorKind {
         match value {
             EngineError::SplitPointAtBoundary { .. } => Self::SplitPointAtBoundary,
             EngineError::SegmentNotFound { .. } => Self::SegmentNotFound,
-            EngineError::SegmentIdNotFound { .. } => Self::SegmentNotFound,
+            EngineError::SegmentIdNotFound { .. } => Self::Other,
             _ => Self::Other,
         }
     }
@@ -412,7 +412,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    use super::{Command, Engine, Event, ExportSettings};
+    use super::{Command, Engine, EngineErrorKind, Event, ExportSettings};
     use crate::export::{ExportAudioSettings, ExportVideoPlan, ExportVideoSegment};
     use crate::preview::{
         MediaBackend, PreviewFrame, PreviewPixelFormat, ProbedAudioStream, ProbedMedia,
@@ -475,6 +475,12 @@ mod tests {
 
         let decoded_seconds = calls.lock().expect("lock decode calls")[0];
         assert!((decoded_seconds - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn segment_id_not_found_maps_to_other_error_kind() {
+        let error = crate::error::EngineError::SegmentIdNotFound { segment_id: 99 };
+        assert_eq!(EngineErrorKind::from(&error), EngineErrorKind::Other);
     }
 
     #[test]
