@@ -328,14 +328,20 @@ where
         };
         if let Some(request) = request {
             let direction = self.scrub_direction(&request);
+            let is_sequential_directional =
+                self.is_sequential_directional_request(&request, direction);
             let (frame, cache_hit) =
                 self.decode_preview_frame_cached(&request.path, request.source_tl)?;
             events.push(Event::PreviewFrameReady {
                 t_tl: clamped,
                 frame,
             });
-            if cache_hit && direction == ScrubDirection::Unknown {
-                self.prefetch_neighbors(&request);
+            if cache_hit {
+                if direction == ScrubDirection::Unknown {
+                    self.prefetch_neighbors(&request);
+                } else if is_sequential_directional {
+                    self.prefetch_directional_neighbor(&request, direction);
+                }
             }
             self.last_preview = Some(LastPreviewTarget {
                 path: request.path,
@@ -474,6 +480,26 @@ where
         }
     }
 
+    fn is_sequential_directional_request(
+        &self,
+        request: &PreviewRequest,
+        direction: ScrubDirection,
+    ) -> bool {
+        if direction == ScrubDirection::Unknown {
+            return false;
+        }
+
+        let Some(previous) = self.last_preview.as_ref() else {
+            return false;
+        };
+        if previous.path != request.path {
+            return false;
+        }
+
+        let delta = (request.source_tl - previous.source_tl).abs();
+        delta <= self.preview_cache.bucket_size_tl().max(1)
+    }
+
     fn prefetch_neighbors(&mut self, request: &PreviewRequest) {
         let mut decoded = 0usize;
         for offset in prefetch_offsets() {
@@ -506,6 +532,43 @@ where
                         "prefetch decode failed"
                     );
                 }
+            }
+        }
+    }
+
+    fn prefetch_directional_neighbor(
+        &mut self,
+        request: &PreviewRequest,
+        direction: ScrubDirection,
+    ) {
+        let step = self.preview_cache.bucket_size_tl().max(1);
+        let next_source_tl = match direction {
+            ScrubDirection::Forward => request.source_tl.checked_add(step),
+            ScrubDirection::Backward => request.source_tl.checked_sub(step),
+            ScrubDirection::Unknown => None,
+        };
+        let Some(next_source_tl) = next_source_tl else {
+            return;
+        };
+        if next_source_tl < 0 || self.preview_cache.contains(&request.path, next_source_tl) {
+            return;
+        }
+
+        match self
+            .media
+            .decode_preview_frame(&request.path, timeline_ticks_to_seconds(next_source_tl))
+        {
+            Ok(frame) => {
+                self.preview_cache
+                    .insert(&request.path, next_source_tl, frame);
+            }
+            Err(error) => {
+                debug!(
+                    source_tl = next_source_tl,
+                    path = ?request.path,
+                    %error,
+                    "directional prefetch decode failed"
+                );
             }
         }
     }
@@ -667,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn set_playhead_on_cache_hit_does_not_prefetch_directional_neighbors() {
+    fn set_playhead_on_directional_cache_miss_decodes_only_requested_frames() {
         let backend = MockBackend::new(sample_probed_media(), sample_frame());
         let calls = backend.decode_calls();
         let mut engine = Engine::new(backend);
@@ -682,9 +745,6 @@ mod tests {
             .expect("set playhead should succeed");
         engine
             .handle_command(Command::SetPlayhead { t_tl: 533_333 })
-            .expect("set playhead should succeed");
-        engine
-            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
             .expect("set playhead should succeed");
 
         let calls = calls.lock().expect("lock decode calls");
@@ -715,6 +775,44 @@ mod tests {
         assert_eq!(count_close_calls(&calls, 1.5), 1);
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().any(|seconds| (*seconds - 1.5).abs() > 1e-6));
+    }
+
+    #[test]
+    fn set_playhead_on_sequential_directional_cache_hit_prefetches_next_bucket() {
+        let backend = MockBackend::new(sample_probed_media(), sample_frame());
+        let calls = backend.decode_calls();
+        let mut engine = Engine::new(backend);
+        let import_events = engine
+            .handle_command(Command::Import {
+                path: PathBuf::from("demo.mp4"),
+            })
+            .expect("import should succeed");
+        let Event::ProjectChanged(snapshot) = &import_events[0] else {
+            panic!("first import event must be ProjectChanged");
+        };
+        let step = snapshot.preview_bucket_tl;
+
+        // First request decodes the current frame.
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("first set playhead should succeed");
+        // Same-position request hits cache and warms one neighbor.
+        engine
+            .handle_command(Command::SetPlayhead { t_tl: 500_000 })
+            .expect("second set playhead should succeed");
+        // Neighbor request hits cache and should prefetch one more forward bucket.
+        engine
+            .handle_command(Command::SetPlayhead {
+                t_tl: 500_000 + step,
+            })
+            .expect("third set playhead should succeed");
+
+        let calls = calls.lock().expect("lock decode calls");
+        assert_eq!(count_close_calls(&calls, 1.5), 1);
+        let warmed_neighbor = 1.5 + (step as f64 / 1_000_000.0);
+        assert_eq!(count_close_calls(&calls, warmed_neighbor), 1);
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().any(|seconds| *seconds > warmed_neighbor));
     }
 
     #[test]

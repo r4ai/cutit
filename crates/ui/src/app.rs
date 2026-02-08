@@ -1,7 +1,9 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use std::{cmp, sync::mpsc::TrySendError};
 
 use engine::{Command, EngineErrorKind, Event, ExportSettings, ProjectSnapshot};
+use iced::time;
 use iced::widget::canvas;
 use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Length, Subscription, Task};
@@ -18,6 +20,8 @@ pub enum Message {
     ImportPressed,
     ExportPathChanged(String),
     ExportPressed,
+    PlayPausePressed,
+    PlaybackTick(Instant),
     SplitPressed,
     CutPressed,
     TimelineScrubbed(i64),
@@ -46,6 +50,7 @@ pub struct AppState {
     pending_split_tl: Option<i64>,
     pending_cut_tl: Option<i64>,
     last_split_tl: Option<i64>,
+    is_playing: bool,
     timeline_cache: canvas::Cache,
     status: String,
 }
@@ -70,6 +75,7 @@ impl AppState {
                 pending_split_tl: None,
                 pending_cut_tl: None,
                 last_split_tl: None,
+                is_playing: false,
                 timeline_cache: canvas::Cache::new(),
                 status: String::from("starting engine bridge"),
             },
@@ -109,6 +115,12 @@ impl AppState {
                 }) {
                     self.status = format!("export requested: {}", path);
                 }
+            }
+            Message::PlayPausePressed => {
+                self.toggle_playback();
+            }
+            Message::PlaybackTick(_at) => {
+                self.handle_playback_tick();
             }
             Message::SplitPressed => {
                 let clamped = self.clamp_playhead(self.playhead_tl);
@@ -177,6 +189,7 @@ impl AppState {
                 self.pending_split_tl = None;
                 self.pending_cut_tl = None;
                 self.last_split_tl = None;
+                self.is_playing = false;
             }
         }
 
@@ -220,6 +233,64 @@ impl AppState {
 
     fn queue_playhead_for_idle_warm(&mut self, t_tl: i64) {
         self.queue_playhead(t_tl, false);
+    }
+
+    fn toggle_playback(&mut self) {
+        if self.is_playing {
+            self.is_playing = false;
+            self.status = String::from("playback paused");
+            return;
+        }
+
+        if self
+            .project
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.duration_tl <= 0)
+        {
+            self.status = String::from("cannot start playback: project is empty");
+            return;
+        }
+
+        let clamped = self.clamp_playhead(self.playhead_tl);
+        self.playhead_tl = clamped;
+        self.is_playing = true;
+        self.status = format!("playback started at {}", clamped);
+        self.queue_playhead_from_user(clamped);
+    }
+
+    fn handle_playback_tick(&mut self) {
+        if !self.is_playing {
+            return;
+        }
+
+        let Some(project) = self.project.as_ref() else {
+            self.is_playing = false;
+            self.status = String::from("playback stopped: project is not loaded");
+            return;
+        };
+        if project.duration_tl <= 0 {
+            self.is_playing = false;
+            self.status = String::from("playback stopped: project is empty");
+            return;
+        }
+
+        let max_tick = project.duration_tl - 1;
+        if self.playhead_tl >= max_tick {
+            self.is_playing = false;
+            self.status = String::from("playback reached timeline end");
+            return;
+        }
+
+        let step = self.preview_bucket_tl().max(1);
+        let next = self.playhead_tl.saturating_add(step).clamp(0, max_tick);
+        if next == self.playhead_tl {
+            self.is_playing = false;
+            self.status = String::from("playback reached timeline end");
+            return;
+        }
+
+        self.playhead_tl = next;
+        self.queue_playhead_from_user(next);
     }
 
     fn request_split(&mut self, at_tl: i64) {
@@ -314,6 +385,7 @@ impl AppState {
     fn apply_engine_event(&mut self, event: Event) {
         match event {
             Event::ProjectChanged(snapshot) => {
+                self.is_playing = false;
                 self.project = Some(snapshot);
                 self.playhead_tl = self.clamp_playhead(self.playhead_tl);
                 self.preview_image = None;
@@ -498,7 +570,8 @@ impl AppState {
     }
 
     fn should_queue_idle_warm(&self, t_tl: i64) -> bool {
-        self.project.is_some()
+        !self.is_playing
+            && self.project.is_some()
             && self.latest_requested_playhead_tl == Some(t_tl)
             && self.pending_playhead_tl.is_none()
             && !self.playhead_request_in_flight
@@ -508,9 +581,11 @@ impl AppState {
 
     /// Renders the UI tree.
     pub fn view(&self) -> Element<'_, Message> {
+        let play_label = if self.is_playing { "Pause" } else { "Play" };
         let import_row = row![
             text_input("media path", &self.import_path).on_input(Message::ImportPathChanged),
             button("Import").on_press(Message::ImportPressed),
+            button(play_label).on_press(Message::PlayPausePressed),
             button("Split").on_press(Message::SplitPressed),
             button("Cut").on_press(Message::CutPressed),
         ]
@@ -559,6 +634,10 @@ impl AppState {
             timeline_widget,
             text(format!("Playhead: {}", self.playhead_tl)),
             text(format!(
+                "Playback: {}",
+                if self.is_playing { "playing" } else { "paused" }
+            )),
+            text(format!(
                 "Segments: {}",
                 self.project
                     .as_ref()
@@ -575,7 +654,13 @@ impl AppState {
 
     /// Subscribes to bridge events emitted by the engine worker thread.
     pub fn subscription(&self) -> Subscription<Message> {
-        engine_subscription().map(Message::Bridge)
+        let mut subscriptions = vec![engine_subscription().map(Message::Bridge)];
+        if self.is_playing {
+            let interval = Duration::from_micros(self.preview_bucket_tl().max(1) as u64);
+            subscriptions.push(time::every(interval).map(Message::PlaybackTick));
+        }
+
+        Subscription::batch(subscriptions)
     }
 
     #[cfg(test)]
@@ -596,6 +681,7 @@ impl AppState {
             pending_split_tl: None,
             pending_cut_tl: None,
             last_split_tl: None,
+            is_playing: false,
             timeline_cache: canvas::Cache::new(),
             status: String::from("idle"),
         }
@@ -671,6 +757,91 @@ mod tests {
 
         let command = command_rx.recv().expect("set playhead command");
         assert_eq!(command, Command::SetPlayhead { t_tl: 42 });
+    }
+
+    #[test]
+    fn play_button_starts_playback_and_dispatches_set_playhead_command() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 100,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(40));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PlayheadChanged { t_tl: 40 },
+        )));
+
+        let _ = app.update(Message::PlayPausePressed);
+
+        let command = command_rx.recv().expect("play warm set playhead command");
+        assert_eq!(command, Command::SetPlayhead { t_tl: 40 });
+        assert!(app.is_playing);
+    }
+
+    #[test]
+    fn playback_tick_advances_playhead_by_preview_bucket_and_dispatches_command() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 200_000,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+
+        let _ = app.update(Message::PlayPausePressed);
+        let first = command_rx.recv().expect("play warm set playhead command");
+        assert_eq!(first, Command::SetPlayhead { t_tl: 0 });
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PlayheadChanged { t_tl: 0 },
+        )));
+
+        let _ = app.update(Message::PlaybackTick(std::time::Instant::now()));
+
+        let second = command_rx
+            .recv()
+            .expect("playback step set playhead command");
+        assert_eq!(second, Command::SetPlayhead { t_tl: 33_333 });
+    }
+
+    #[test]
+    fn playback_tick_at_timeline_end_stops_playback_without_dispatching_command() {
+        let (command_tx, command_rx) = mpsc::sync_channel(8);
+        let mut app = AppState::from_sender_for_test(command_tx);
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
+            ProjectSnapshot {
+                assets: vec![],
+                segments: vec![],
+                duration_tl: 50,
+                preview_bucket_tl: 33_333,
+            },
+        ))));
+
+        let _ = app.update(Message::TimelineScrubbed(49));
+        let _ = command_rx.recv().expect("set playhead command");
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PlayheadChanged { t_tl: 49 },
+        )));
+
+        let _ = app.update(Message::PlayPausePressed);
+        let _ = command_rx.recv().expect("play warm set playhead command");
+        let _ = app.update(Message::Bridge(BridgeEvent::Event(
+            Event::PlayheadChanged { t_tl: 49 },
+        )));
+
+        let _ = app.update(Message::PlaybackTick(std::time::Instant::now()));
+
+        assert!(!app.is_playing);
+        assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]
