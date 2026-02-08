@@ -42,7 +42,6 @@ pub struct AppState {
     playhead_request_in_flight: bool,
     idle_warm_target_tl: Option<i64>,
     idle_warm_rounds: u16,
-    last_preview_ready_tl: Option<i64>,
     loaded_preview_ranges_tl: Vec<(i64, i64)>,
     pending_split_tl: Option<i64>,
     pending_cut_tl: Option<i64>,
@@ -67,7 +66,6 @@ impl AppState {
                 playhead_request_in_flight: false,
                 idle_warm_target_tl: None,
                 idle_warm_rounds: 0,
-                last_preview_ready_tl: None,
                 loaded_preview_ranges_tl: Vec::new(),
                 pending_split_tl: None,
                 pending_cut_tl: None,
@@ -175,7 +173,6 @@ impl AppState {
                 self.playhead_request_in_flight = false;
                 self.idle_warm_target_tl = None;
                 self.idle_warm_rounds = 0;
-                self.last_preview_ready_tl = None;
                 self.loaded_preview_ranges_tl.clear();
                 self.pending_split_tl = None;
                 self.pending_cut_tl = None;
@@ -327,7 +324,6 @@ impl AppState {
                 self.playhead_request_in_flight = false;
                 self.idle_warm_target_tl = None;
                 self.idle_warm_rounds = 0;
-                self.last_preview_ready_tl = None;
                 self.last_split_tl = None;
                 let pending_split_tl = self.pending_split_tl.take();
                 let pending_cut_tl = self.pending_cut_tl.take();
@@ -432,23 +428,8 @@ impl AppState {
     }
 
     fn record_loaded_preview_at(&mut self, t_tl: i64) {
-        let bucket_tl = self.preview_bucket_tl();
-        let direction = match self.last_preview_ready_tl {
-            Some(previous_t_tl) if t_tl > previous_t_tl => 1,
-            Some(previous_t_tl) if t_tl < previous_t_tl => -1,
-            _ => 0,
-        };
-        self.last_preview_ready_tl = Some(t_tl);
-
+        // Record only what is definitively loaded for this event.
         self.add_loaded_bucket_for_tick(t_tl);
-        match direction {
-            1 => self.add_loaded_bucket_for_tick(t_tl + bucket_tl),
-            -1 => self.add_loaded_bucket_for_tick(t_tl - bucket_tl),
-            _ => {
-                self.add_loaded_bucket_for_tick(t_tl - bucket_tl);
-                self.add_loaded_bucket_for_tick(t_tl + bucket_tl);
-            }
-        }
     }
 
     fn add_loaded_bucket_for_tick(&mut self, t_tl: i64) {
@@ -611,7 +592,6 @@ impl AppState {
             playhead_request_in_flight: false,
             idle_warm_target_tl: None,
             idle_warm_rounds: 0,
-            last_preview_ready_tl: None,
             loaded_preview_ranges_tl: Vec::new(),
             pending_split_tl: None,
             pending_cut_tl: None,
@@ -950,7 +930,7 @@ mod tests {
         )));
 
         assert!(range_contains_tick(&app.loaded_preview_ranges_tl, 40_000));
-        assert!(range_contains_tick(&app.loaded_preview_ranges_tl, 73_333));
+        assert!(!range_contains_tick(&app.loaded_preview_ranges_tl, 73_333));
 
         let _ = app.update(Message::Bridge(BridgeEvent::Event(Event::ProjectChanged(
             ProjectSnapshot {

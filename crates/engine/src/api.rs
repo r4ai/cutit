@@ -9,8 +9,11 @@ use crate::time::{TIMELINE_TIME_BASE, rescale};
 use tracing::{debug, info};
 
 const PREVIEW_CACHE_CAPACITY: usize = 96;
+/// Fallback preview-cache bucket size in timeline ticks.
+///
+/// This default is used when stream metadata is insufficient to derive a
+/// source-specific bucket size from frame rate/time base.
 pub const DEFAULT_PREVIEW_CACHE_BUCKET_TL: i64 = 33_333;
-const PREFETCH_RADIUS_DIRECTIONAL: i64 = 18;
 const PREFETCH_RADIUS_IDLE: i64 = 120;
 const PREFETCH_MAX_DECODES_PER_REQUEST: usize = 1;
 
@@ -332,7 +335,7 @@ where
                 frame,
             });
             if cache_hit && direction == ScrubDirection::Unknown {
-                self.prefetch_neighbors(&request, direction);
+                self.prefetch_neighbors(&request);
             }
             self.last_preview = Some(LastPreviewTarget {
                 path: request.path,
@@ -471,9 +474,9 @@ where
         }
     }
 
-    fn prefetch_neighbors(&mut self, request: &PreviewRequest, direction: ScrubDirection) {
+    fn prefetch_neighbors(&mut self, request: &PreviewRequest) {
         let mut decoded = 0usize;
-        for offset in prefetch_offsets(direction) {
+        for offset in prefetch_offsets() {
             if decoded >= PREFETCH_MAX_DECODES_PER_REQUEST {
                 break;
             }
@@ -525,21 +528,13 @@ where
     }
 }
 
-fn prefetch_offsets(direction: ScrubDirection) -> Vec<i64> {
-    match direction {
-        ScrubDirection::Forward => (1..=PREFETCH_RADIUS_DIRECTIONAL).collect(),
-        ScrubDirection::Backward => (1..=PREFETCH_RADIUS_DIRECTIONAL)
-            .map(|offset| -offset)
-            .collect(),
-        ScrubDirection::Unknown => {
-            let mut offsets = Vec::with_capacity((PREFETCH_RADIUS_IDLE * 2) as usize);
-            for step in 1..=PREFETCH_RADIUS_IDLE {
-                offsets.push(step);
-                offsets.push(-step);
-            }
-            offsets
-        }
+fn prefetch_offsets() -> Vec<i64> {
+    let mut offsets = Vec::with_capacity((PREFETCH_RADIUS_IDLE * 2) as usize);
+    for step in 1..=PREFETCH_RADIUS_IDLE {
+        offsets.push(step);
+        offsets.push(-step);
     }
+    offsets
 }
 
 fn timeline_ticks_to_seconds(t_tl: i64) -> f64 {
